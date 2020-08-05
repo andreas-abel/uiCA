@@ -52,20 +52,28 @@ class FusedUop:
       return self.uops
 
 
+class LaminatedUop:
+   def __init__(self, fusedUops):
+      self.fusedUops = fusedUops
+
+   def getFusedUops(self):
+      return self.fusedUops
+
+
 class StackSynchUop(Uop):
    def __init__(self, instr, rnd, renamedInputOperand, renamedOutputOperand):
       possiblePorts = (['0','1','5'] if arch in ['CON', 'WOL', 'NHM', 'WSM', 'SNB', 'IVB'] else ['0','1','5','6'])
       Uop.__init__(self, instr, rnd, possiblePorts, [renamedInputOperand], [renamedOutputOperand], {(0,0): 1})
 
 # A combination of a StackSynchUop with a (possibly fused) uop that takes only one slot in the decoder; note: does not exist in the actual hardware
-class PseudoFusedStackSynchUop: 
-   def __init__(self, uops):
-      self.uops = uops
+#class PseudoFusedStackSynchUop:
+#   def __init__(self, uops):
+#      self.uops = uops
 
 
 class Instr:
-   def __init__(self, asm, opcode, nPrefixes, instrStr, portData, uops, retireSlots, inputOperands, indexesOfAddrRegs, outputOperands, latencies, lcpStall,
-                modifiesStack):
+   def __init__(self, asm, opcode, nPrefixes, instrStr, portData, uops, retireSlots, nLaminatedDomainUops, inputOperands, indexesOfAddrRegs, outputOperands,
+                latencies, lcpStall, modifiesStack, macroFusibleWith, macroFused=False):
       self.asm = asm
       self.opcode = opcode
       self.nPrefixes = nPrefixes
@@ -73,20 +81,23 @@ class Instr:
       self.portData = portData
       self.uops = uops
       self.retireSlots = retireSlots
+      self.nLaminatedDomainUops = nLaminatedDomainUops
       self.inputOperands = inputOperands # list registers
       self.indexesOfAddrRegs = indexesOfAddrRegs # indexes into inputOperands
       self.outputOperands = outputOperands
       self.latencies = latencies # latencies[(x,y)] = l; x,y are indices into input and output operands
       self.lcpStall = lcpStall
       self.modifiesStack = modifiesStack # pops or pushes to the stack
+      self.macroFusibleWith = macroFusibleWith
+      self.macroFused = macroFused # macro-fused with the previous instruction
 
    def __repr__(self):
        return "Instr: " + str(self.__dict__)
 
 class UnknownInstr(Instr):
    def __init__(self, asm, opcode, nPrefixes):
-      Instr.__init__(self, asm, opcode, nPrefixes, instrStr='', portData={}, uops=0, retireSlots=1, inputOperands=[], indexesOfAddrRegs=[], outputOperands=[],
-                     latencies={}, lcpStall=False, modifiesStack=False)
+      Instr.__init__(self, asm, opcode, nPrefixes, instrStr='', portData={}, uops=0, retireSlots=1, nLaminatedDomainUops=1, inputOperands=[],
+                     indexesOfAddrRegs=[], outputOperands=[], latencies={}, lcpStall=False, modifiesStack=False, macroFusibleWith=set())
 
 class RegOperand:
    def __init__(self, reg):
@@ -121,23 +132,19 @@ class FrontEnd:
    def cycle(self):
       self.predecoder.cycle()
 
-      uops = []
-      if len(self.reorderBuffer.uops) < RB_Width:
+      laminatedDomainUops = []
+      if len(self.reorderBuffer.uops) < RB_Width: #ToDo: use IDQ capacity instead
          while self.instructionQueue:
             instrUops = self.instructionQueue[0][1]
-            if uops and (len(uops) + len(instrUops) > Decode_Width):
+            if laminatedDomainUops and ((len(instrUops) > 1) or (len(laminatedDomainUops) + len(instrUops) > Decode_Width)):
                break
-            uops.extend(instrUops)
+            laminatedDomainUops.extend(instrUops)
             self.instructionQueue.popleft()
-            
+
          #uops = [uop for _ in xrange(min(FE_Width, len(self.instructionQueue))) for uop in self.instructionQueue.popleft()[1]]
       #print len(uops)
-      IDQ = []
-      for fusedUop in uops: # ToDo: unlamination
-         if isinstance(fusedUop, PseudoFusedStackSynchUop):
-            IDQ.extend(fusedUop.uops)
-         else:
-            IDQ.append(fusedUop)
+      IDQ = [fusedUop for lUop in laminatedDomainUops for fusedUop in lUop.getFusedUops()]
+      #print IDQ
 
       self.reorderBuffer.cycle(IDQ)
       self.scheduler.cycle([u for fusedUop in IDQ for u in fusedUop.getUnfusedUops() if u.possiblePorts])
@@ -157,10 +164,10 @@ class PreDecoder:
          if not self.curBlockQueue: # ToDo: other microarch. than SKL
             while True:
                instr, uops = self.nextInstrUops
-               instrLen = len(instr.opcode)/2               
+               instrLen = len(instr.opcode)/2
 
                if self.curOffset + instrLen <= 16:
-                  self.curBlockQueue.append((instr, uops))
+                  self.curBlockQueue.append((instr, uops)) #ToDo: is instr meed in curBlockQueue?
                   self.curOffset += instrLen
                   self.nextInstrUops = next(self.uopGenerator)
 
@@ -173,10 +180,10 @@ class PreDecoder:
                else:
                   self.curOffset -= 16
                   break
-            
+
             if any(instr.lcpStall for instr, _ in self.curBlockQueue):
                self.stalled = sum(3 for instr, _ in self.curBlockQueue if instr.lcpStall)
-            
+
          if not self.stalled and len(self.instructionQueue) < 25:
             self.instructionQueue.extend(self.curBlockQueue)
             self.curBlockQueue.clear()
@@ -321,6 +328,7 @@ def getInstructions(filename, rawFile, iacaMarkers, instrDataDict):
    for instrD in disas:
       usedRegs = [getCanonicalReg(r) for _, r in instrD.regOperands.items() if r in GPRegs or 'MM' in r]
       sameReg = (len(usedRegs) > 1 and len(set(usedRegs)) == 1)
+      usesIndexedAddr = any((getMemAddr(memOp).index is not None) for memOp in instrD.memOperands.values())
       nPrefixes = int(instrD.attributes.get('NPREFIXES', 0))
       lcpStall = ('PREFIX66' in instrD.attributes) and (instrD.attributes.get('IMM_WIDTH', '') == '16')
       modifiesStack = any(('STACK' in r) for r in instrD.regOperands.values())
@@ -329,14 +337,25 @@ def getInstructions(filename, rawFile, iacaMarkers, instrDataDict):
       for instrData in instrDataDict.get(instrD.iform, []):
          if all(instrD.attributes.get(k, '0') == v for k, v in instrData['attributes'].items()):
             uops = instrData.get('uops', 0)
-            retireSlots = instrData.get('retireSlots', 0)
+            retireSlots = instrData.get('retSlots', 0)
+            uopsMITE = instrData.get('uopsMITE', 0)
+            uopsMS = instrData.get('uopsMS', 0)
             latData = instrData.get('lat', dict())
             portData = instrData.get('ports', {})
             if sameReg:
-               uops = instrData.get('uops_SameReg', uops)
-               retireSlots = instrData.get('retireSlots_SameReg', retireSlots)
-               latData = instrData.get('lat_SameReg', latData)
-               portData = instrData.get('ports_SameReg', portData)
+               uops = instrData.get('uops_SR', uops)
+               retireSlots = instrData.get('retSlots_SR', retireSlots)
+               uopsMITE = instrData.get('uopsMITE_SR', uopsMITE)
+               uopsMS = instrData.get('uopsMS_SR', uopsMS)
+               latData = instrData.get('lat_SR', latData)
+               portData = instrData.get('ports_SR', portData)
+            elif usesIndexedAddr:
+               uops = instrData.get('uops_I', uops)
+               retireSlots = instrData.get('retSlots_I', retireSlots)
+               uopsMITE = instrData.get('uopsMITE_I', uopsMITE)
+               uopsMS = instrData.get('uopsMS_I', uopsMS)
+               portData = instrData.get('ports_I', portData)
+            nLaminatedDomainUops = uopsMITE + uopsMS
 
             instrInputRegOperands = [(n,r) for n, r in instrD.regOperands.items() if (not 'STACK' in r) and (('R' in instrD.rw[n]) or ('CW' in instrD.rw[n])
                                                                                                                              or (getRegSize(r) in [8, 16]))]
@@ -365,21 +384,36 @@ def getInstructions(filename, rawFile, iacaMarkers, instrDataDict):
             if not modifiesStack:
                for inpN, inpM in set(instrInputMemOperands + instrOutputMemOperands):
                   memAddr = getMemAddr(inpM)
-                  for reg in [memAddr.base, memAddr.index]:
+                  for reg, addrType in [(memAddr.base, 'addr'), (memAddr.index, 'addrI')]:
                      if reg is None: continue
                      inputOperands.append(RegOperand(reg))
                      indexesOfAddrRegs.append(len(inputOperands)-1)
                      for oi, (outN, _) in enumerate(instrOutputOperands):
-                        if 'MM' in reg:
-                           latencies[(len(inputOperands)-1, oi)] = latData.get((inpN, outN, 'addrVSIB'), 1)
-                        else:
-                           latencies[(len(inputOperands)-1, oi)] = latData.get((inpN, outN, 'addr'), 1)
+                        latencies[(len(inputOperands)-1, oi)] = latData.get((inpN, outN, addrType), 1)
 
-            instruction = Instr(instrD.asm, instrD.opcode, nPrefixes, instrData['string'], portData, uops, retireSlots, inputOperands, indexesOfAddrRegs,
-                                outputOperands, latencies, lcpStall, modifiesStack)
+            instruction = Instr(instrD.asm, instrD.opcode, nPrefixes, instrData['string'], portData, uops, retireSlots, nLaminatedDomainUops, inputOperands,
+                                indexesOfAddrRegs, outputOperands, latencies, lcpStall, modifiesStack, instrData.get('macroFusible', set()))
+            print instruction
             break
+
       if instruction is None:
          instruction = UnknownInstr(instrD.asm, instrD.opcode, nPrefixes)
+
+      # Macro-fusion
+      if instructions:
+         prevInstr = instructions[-1]
+         if instruction.instrStr in prevInstr.macroFusibleWith:
+            instruction.macroFused = True
+            instrPorts = instruction.portData.keys()[0]
+            if prevInstr.uops == 0:
+               prevInstr.uops = instruction.uops
+               prevInstr.portData = instruction.portData
+            else:
+               for p, u in prevInstr.portData.items():
+                  if set(instrPorts).issubset(set(p)):
+                     del prevInstr.portData[p]
+                     prevInstr.portData[instrPorts] = u
+
       instructions.append(instruction)
    return instructions
 
@@ -390,6 +424,8 @@ def UopGenerator(instructions):
    renameDict = {}
    for rnd in count():
       for instr in instructions:
+         if instr.macroFused: continue
+
          stackSynchUop = None
          if (stackPtrImplicitlyModified and
                any((getCanonicalReg(op.reg) == 'RSP') for op in instr.inputOperands+instr.outputOperands if isinstance(op, RegOperand))):
@@ -401,7 +437,7 @@ def UopGenerator(instructions):
 
          if instr.modifiesStack:
             stackPtrImplicitlyModified = True
-            
+
          renamedInputOperands = []
          renamedOutputOperands = []
          if instr.uops:
@@ -418,10 +454,13 @@ def UopGenerator(instructions):
                   key = getCanonicalReg(op.reg)
                else:
                   key = tuple(renameDict.get(x, x) for x in op.memAddr)
-               renamedOp = RenamedOperand()
+               if key == 'RIP':
+                  renamedOp = RenamedOperand(-1)
+               else:
+                  renamedOp = RenamedOperand()
                renameDict[key] = renamedOp
                renamedOutputOperands.append(renamedOp)
-            
+
          else:
             if (len(instr.inputOperands) == 1 and len(instr.outputOperands) == 1 and isinstance(instr.inputOperands[0], RegOperand) and
                                                                                      isinstance(instr.outputOperands[0], RegOperand)):
@@ -442,33 +481,36 @@ def UopGenerator(instructions):
                   renameDict[key] = renamedOp
 
          unfusedUops = []
-
          remUops = instr.retireSlots
          for pc, n in instr.portData.items():
             remUops -= n
             for _ in range(0, n):
                ports = list(pc)
                unfusedUops.append(Uop(instr, rnd, ports, renamedInputOperands, renamedOutputOperands, dict(instr.latencies)))
-
          for _ in range(0, remUops):
             uop = Uop(instr, rnd, None, renamedInputOperands, renamedOutputOperands, dict(instr.latencies))
             unfusedUops.append(uop)
-
          for uop in unfusedUops:
             uop.relatedUops = list(unfusedUops)
 
          #uopsRoundDict[instr][ri].extend(unfusedUops)
 
          fusedDomainUops = []
-         for _ in range(0, instr.uops - instr.retireSlots):
-            if len(unfusedUops) < 2: break
-            fusedDomainUops.append(FusedUop([unfusedUops.pop(), unfusedUops.pop()]))
-         fusedDomainUops.extend(unfusedUops)
-
+         for _ in range(0, instr.retireSlots-1):
+            fusedDomainUops.append(FusedUop([unfusedUops.pop()]))
+         fusedDomainUops.append(FusedUop(unfusedUops))
          if stackSynchUop is not None:
-            fusedDomainUops[0] = PseudoFusedStackSynchUop([stackSynchUop, fusedDomainUops[0]])
-         
-         yield (instr, fusedDomainUops)
+            fusedDomainUops.append(stackSynchUop)
+
+         laminatedDomainUops = []
+         for _ in range(0, instr.nLaminatedDomainUops-1):
+            laminatedDomainUops.append(LaminatedUop([fusedDomainUops.pop()]))
+         laminatedDomainUops.append(LaminatedUop(fusedDomainUops))
+
+         #if stackSynchUop is not None:
+         #   fusedDomainUops[0] = PseudoFusedStackSynchUop([stackSynchUop, fusedDomainUops[0]])
+
+         yield (instr, laminatedDomainUops)
          #allUops.extend(fusedDomainUops)
 
 def printPortUsage(instructions, uopsForRound):
@@ -479,7 +521,8 @@ def printPortUsage(instructions, uopsForRound):
    print '-'*(1+10*(len(allPorts)+1))
    portUsageC = Counter(uop.actualPort for uopsDict in uopsForRound for uops in uopsDict.values() for uop in uops)
    portUsageL = [('{:.2f}'.format(float(portUsageC[p])/len(uopsForRound)) if p in portUsageC else '') for p in allPorts]
-   print formatStr.format(str(sum(len(uops) for uops in uopsForRound[0].values())), *portUsageL)
+   #print formatStr.format(str(sum(len(uops) for uops in uopsForRound[0].values())), *portUsageL)
+   print formatStr.format(str(sum(instr.uops for instr in instructions if not instr.macroFused)), *portUsageL)
    print '-'*(1+10*(len(allPorts)+1))
    print ''
 
@@ -490,9 +533,11 @@ def printPortUsage(instructions, uopsForRound):
       portUsageC = Counter(uop.actualPort for uops in uopsForInstr for uop in uops)
       portUsageL = [('{:.2f}'.format(float(portUsageC[p])/len(uopsForRound)) if p in portUsageC else '') for p in allPorts]
 
-      uopsCol = str(len(uopsForInstr[0]))
+      uopsCol = str(instr.uops)
       if isinstance(instr, UnknownInstr):
          uopsCol = 'X'
+      elif instr.macroFused:
+         uopsCol = 'M'
 
       print formatStr.format(uopsCol, *portUsageL) + ' ' + instr.asm
 
@@ -504,7 +549,7 @@ def main():
    parser.add_argument('filename', help="File to be disassembled")
    parser.add_argument("-iacaMarkers", help="Use IACA markers", action='store_true')
    parser.add_argument("-raw", help="raw file", action='store_true')
-   parser.add_argument("-arch", help="Microarchitecture", default='SKL')
+   parser.add_argument("-arch", help="Microarchitecture", default='CFL')
    args = parser.parse_args()
 
    global arch, allPorts
@@ -514,7 +559,7 @@ def main():
    instrDataDict = importlib.import_module('instrData.'+arch).instrData
 
    instructions = getInstructions(args.filename, args.raw, args.iacaMarkers, instrDataDict)
-   lastInstr = instructions[-1]
+   lastApplicableInstr = [instr for instr in instructions if not instr.macroFused][-1] # ignore macro-fused instr.
    adjustLatencies(instructions)
    #print instructions
 
@@ -553,19 +598,20 @@ def main():
    firstRelevantRound = 50
    lastRelevantRound = nRounds-1
    for rnd in range(lastRelevantRound, lastRelevantRound-5, -1):
-      if uopsForRound[firstRelevantRound][lastInstr][-1].retireIdx == uopsForRound[rnd][lastInstr][-1].retireIdx:
+      if uopsForRound[firstRelevantRound][lastApplicableInstr][-1].retireIdx == uopsForRound[rnd][lastApplicableInstr][-1].retireIdx:
          lastRelevantRound = rnd
          break
 
    uopsForRound = uopsForRound[firstRelevantRound:(lastRelevantRound+1)]
 
-   TP = float(uopsForRound[-1][lastInstr][-1].retired - uopsForRound[0][lastInstr][-1].retired) / (len(uopsForRound)-1)
+   TP = float(uopsForRound[-1][lastApplicableInstr][-1].retired - uopsForRound[0][lastApplicableInstr][-1].retired) / (len(uopsForRound)-1)
    #TP = max(float((uop2.retired-uop1.retired)) for d in uopsRoundDict.values() for (uop1, uop2) in zip(d[25], d[nRounds-25]))/(nRounds-50)
 
    print 'TP: {:.2f}'.format(TP)
    print ''
 
    printPortUsage(instructions, uopsForRound)
+
 
 
 if __name__ == "__main__":
