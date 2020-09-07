@@ -38,6 +38,14 @@ def main():
                   mValue = measurementNode.attrib.get(mKey+mSuffix)
                   if mValue is not None:
                      instrData[iKey+iSuffix] = int(mValue)
+               if 'TP_unrolled'+mSuffix in measurementNode.attrib:
+                  uopsMite = int(measurementNode.attrib.get('uops_MITE'+mSuffix, 0))
+                  uopsMS = int(measurementNode.attrib.get('uops_MS'+mSuffix, 0))
+                  TPUnrolled = float(measurementNode.attrib['TP_unrolled'+mSuffix])
+                  TPLoop = float(measurementNode.attrib['TP_loop'+mSuffix])
+                  if (uopsMite + uopsMS > 1) or ((.9 < TPUnrolled < 1.1) and (TPLoop < .8)):
+                     instrData['complDec'+iSuffix] = True
+               
                ports = measurementNode.attrib.get('ports'+mSuffix)
                if ports is not None:
                   instrData['ports'+iSuffix] = {p.replace('p', ''): int(n) for np in ports.split('+') for n, p in [np.split('*')]} # ToDo: AMD

@@ -15,33 +15,38 @@ from disas import *
 arch = None
 clock = 0
 allPorts = []
-FE_Width = 6
 Retire_Width = 4
 RB_Width = 224
+RS_Width = 97
 #nDecoders = 5
 Decode_Width = 5
+IDQ_Width = 25
+issue_Width = 4
+IQ_Width = 25
+issue_dispatch_delay = 5
 
 class Uop:
-   def __init__(self, instr, rnd, possiblePorts, renamedInputOperands, renamedOutputOperands, latencies):
+   def __init__(self, instr, rnd, possiblePorts, inputOperands, outputOperands):
       self.instr = instr
       self.rnd = rnd # iteration round
       self.possiblePorts = possiblePorts
-      self.renamedInputOperands = renamedInputOperands
-      self.renamedOutputOperands = renamedOutputOperands
-      self.latencies = latencies # latencies[(x,y)] = l; x,y are indices into renamed input and output operands
+      self.inputOperands = inputOperands # [(instrInputOperand, renamedInpOperand), ...]
+      self.outputOperands = outputOperands
       self.actualPort = None
+      self.predecoded = None
       self.allocated = None
+      self.issued = None
       self.dispatched = None
       self.executed = None
       self.retired = None
       self.retireIdx = None # how many other uops were already retired in the same cycle
-      self.relatedUops = [self]
+      #self.relatedUops = [self]
 
    def getUnfusedUops(self):
       return [self]
 
    def __str__(self):
-      return 'UopInstance(rnd: {}, p: {}, a: {}, d: {}, ex: {}, rt: {}, i: {}, o: {})'.format(self.rnd, self.actualPort, self.allocated, self.dispatched, self.executed, self.retired, self.renamedInputOperands, self.renamedOutputOperands)
+      return 'UopInstance(rnd: {}, p: {}, a: {}, d: {}, ex: {}, rt: {}, i: {}, o: {})'.format(self.rnd, self.actualPort, self.allocated, self.dispatched, self.executed, self.retired, self.inputOperands, self.outputOperands)
 
 
 class FusedUop:
@@ -63,7 +68,7 @@ class LaminatedUop:
 class StackSynchUop(Uop):
    def __init__(self, instr, rnd, renamedInputOperand, renamedOutputOperand):
       possiblePorts = (['0','1','5'] if arch in ['CON', 'WOL', 'NHM', 'WSM', 'SNB', 'IVB'] else ['0','1','5','6'])
-      Uop.__init__(self, instr, rnd, possiblePorts, [renamedInputOperand], [renamedOutputOperand], {(0,0): 1})
+      Uop.__init__(self, instr, rnd, possiblePorts, [(None, renamedInputOperand)], [(None, renamedOutputOperand)])
 
 # A combination of a StackSynchUop with a (possibly fused) uop that takes only one slot in the decoder; note: does not exist in the actual hardware
 #class PseudoFusedStackSynchUop:
@@ -72,8 +77,9 @@ class StackSynchUop(Uop):
 
 
 class Instr:
-   def __init__(self, asm, opcode, nPrefixes, instrStr, portData, uops, retireSlots, nLaminatedDomainUops, inputOperands, indexesOfAddrRegs, outputOperands,
-                latencies, lcpStall, modifiesStack, macroFusibleWith, macroFused=False):
+   def __init__(self, asm, opcode, nPrefixes, instrStr, portData, uops, retireSlots, nLaminatedDomainUops, inputRegOperands, inputMemOperands,
+                outputRegOperands, outputMemOperands, memAddrOperands, latencies, lcpStall, modifiesStack, complexDecoder, macroFusibleWith,
+                macroFused=False):
       self.asm = asm
       self.opcode = opcode
       self.nPrefixes = nPrefixes
@@ -82,22 +88,30 @@ class Instr:
       self.uops = uops
       self.retireSlots = retireSlots
       self.nLaminatedDomainUops = nLaminatedDomainUops
-      self.inputOperands = inputOperands # list registers
-      self.indexesOfAddrRegs = indexesOfAddrRegs # indexes into inputOperands
-      self.outputOperands = outputOperands
-      self.latencies = latencies # latencies[(x,y)] = l; x,y are indices into input and output operands
+      self.inputRegOperands = inputRegOperands
+      self.inputMemOperands = inputMemOperands      
+      self.outputRegOperands = outputRegOperands
+      self.outputMemOperands = outputMemOperands
+      self.memAddrOperands = memAddrOperands
+      self.latencies = latencies # latencies[(inOp,outOp)] = l
       self.lcpStall = lcpStall
       self.modifiesStack = modifiesStack # pops or pushes to the stack
+      self.complexDecoder = complexDecoder # requires the complex decoder
       self.macroFusibleWith = macroFusibleWith
       self.macroFused = macroFused # macro-fused with the previous instruction
 
    def __repr__(self):
        return "Instr: " + str(self.__dict__)
 
+   def isZeroLatencyMovInstr(self):
+      return ('MOV' in self.instrStr) and (not self.uops) and (len(self.inputRegOperands) == 1) and (len(self.outputRegOperands) == 1)
+
+
 class UnknownInstr(Instr):
    def __init__(self, asm, opcode, nPrefixes):
-      Instr.__init__(self, asm, opcode, nPrefixes, instrStr='', portData={}, uops=0, retireSlots=1, nLaminatedDomainUops=1, inputOperands=[],
-                     indexesOfAddrRegs=[], outputOperands=[], latencies={}, lcpStall=False, modifiesStack=False, macroFusibleWith=set())
+      Instr.__init__(self, asm, opcode, nPrefixes, instrStr='', portData={}, uops=0, retireSlots=1, nLaminatedDomainUops=1, inputRegOperands=[],
+                     inputMemOperands=[], outputRegOperands=[], outputMemOperands=[], memAddrOperands=[], latencies={}, lcpStall=False, modifiesStack=False,
+                     complexDecoder=False, macroFusibleWith=set())
 
 class RegOperand:
    def __init__(self, reg):
@@ -117,8 +131,30 @@ class InstrInstance:
 '''
 
 class RenamedOperand:
-   def __init__(self, ready=None):
-      self.ready = ready
+   def __init__(self, nonRenamedOperand=None):      
+      self.nonRenamedOperand = nonRenamedOperand
+      self.uops = [] # list of uops that need to have executed before this operand becomes ready
+      self.__ready = None
+
+   # Returns cycle in which operand became ready, or None if it is not yet ready
+   def ready(self):      
+      if (not self.uops) or (not any(uop.inputOperands for uop in self.uops)):
+         return -1
+      if any((uop.dispatched is None) for uop in self.uops):
+         return None
+
+      if self.__ready is None:
+         self.__ready = -1
+         for inpOp, renInpOp in set((op, rOp) for uop in self.uops for op, rOp in uop.inputOperands):
+            minCycle = sys.maxsize
+            for uop in self.uops:
+               if not (inpOp, renInpOp) in uop.inputOperands: continue
+               minCycle = min(minCycle, uop.dispatched + uop.instr.latencies.get((inpOp, self.nonRenamedOperand), 1))
+            self.__ready = max(self.__ready, minCycle)
+         
+      if self.__ready <= clock:         
+         return self.__ready
+      return None
 
 
 class FrontEnd:
@@ -128,26 +164,40 @@ class FrontEnd:
       self.scheduler = scheduler
       self.instructionQueue = deque()
       self.predecoder = PreDecoder(uopGenerator, self.instructionQueue)
+      self.IDQ = deque()
 
-   def cycle(self):
-      self.predecoder.cycle()
+   def cycle(self):      
+      issueUops = []
+      if not self.reorderBuffer.isFull() and not self.scheduler.isFull():
+         while self.IDQ:
+            fusedUops = self.IDQ[0].getFusedUops()
+            if len(issueUops) + len(fusedUops) > issue_Width:
+               break
+            for fusedUop in fusedUops:
+               for uop in fusedUop.getUnfusedUops():
+                  uop.issued = clock
+            issueUops.extend(fusedUops)
+            self.IDQ.popleft()
+
+      self.reorderBuffer.cycle(issueUops)
+      self.scheduler.cycle(issueUops)
 
       laminatedDomainUops = []
-      if len(self.reorderBuffer.uops) < RB_Width: #ToDo: use IDQ capacity instead
-         while self.instructionQueue:
-            instrUops = self.instructionQueue[0][1]
-            if laminatedDomainUops and ((len(instrUops) > 1) or (len(laminatedDomainUops) + len(instrUops) > Decode_Width)):
-               break
-            laminatedDomainUops.extend(instrUops)
-            self.instructionQueue.popleft()
+      while self.instructionQueue:
+         instr, instrUops = self.instructionQueue[0]
+         if len(self.IDQ) + len(laminatedDomainUops) + len(instrUops) > IDQ_Width:
+            break
+         if laminatedDomainUops and (instr.complexDecoder or (len(laminatedDomainUops) + len(instrUops) > Decode_Width)):
+            break
+         for lamUop in instrUops:               
+            for fusedUop in lamUop.getFusedUops():
+               for uop in fusedUop.getUnfusedUops():
+                  uop.allocated = clock
+         laminatedDomainUops.extend(instrUops)
+         self.instructionQueue.popleft()      
+      self.IDQ.extend(laminatedDomainUops)
 
-         #uops = [uop for _ in xrange(min(FE_Width, len(self.instructionQueue))) for uop in self.instructionQueue.popleft()[1]]
-      #print len(uops)
-      IDQ = [fusedUop for lUop in laminatedDomainUops for fusedUop in lUop.getFusedUops()]
-      #print IDQ
-
-      self.reorderBuffer.cycle(IDQ)
-      self.scheduler.cycle([u for fusedUop in IDQ for u in fusedUop.getUnfusedUops() if u.possiblePorts])
+      self.predecoder.cycle()
 
 
 class PreDecoder:
@@ -167,7 +217,7 @@ class PreDecoder:
                instrLen = len(instr.opcode)/2
 
                if self.curOffset + instrLen <= 16:
-                  self.curBlockQueue.append((instr, uops)) #ToDo: is instr meed in curBlockQueue?
+                  self.curBlockQueue.append((instr, uops))
                   self.curOffset += instrLen
                   self.nextInstrUops = next(self.uopGenerator)
 
@@ -184,7 +234,12 @@ class PreDecoder:
             if any(instr.lcpStall for instr, _ in self.curBlockQueue):
                self.stalled = sum(3 for instr, _ in self.curBlockQueue if instr.lcpStall)
 
-         if not self.stalled and len(self.instructionQueue) < 25:
+         if not self.stalled and len(self.instructionQueue) < IQ_Width:
+            for _, instrUops in self.curBlockQueue:
+               for lamUop in instrUops:
+                  for fusedUop in lamUop.getFusedUops():
+                     for uop in fusedUop.getUnfusedUops():
+                        uop.predecoded = clock
             self.instructionQueue.extend(self.curBlockQueue)
             self.curBlockQueue.clear()
 
@@ -199,9 +254,12 @@ class ReorderBuffer:
    def isEmpty(self):
       return not self.uops
 
+   def isFull(self):
+      return len(self.uops) + issue_Width > RB_Width
+
    def cycle(self, newUops):
       self.retireUops()
-      self.allocateUops(newUops)
+      self.addUops(newUops)
 
    def retireUops(self):
       nRetiredInSameCycle = 0
@@ -219,40 +277,49 @@ class ReorderBuffer:
          else:
             break
 
-   def allocateUops(self, newUops):
+   def addUops(self, newUops):
       for fusedUop in newUops:
          self.uops.append(fusedUop)
          for uop in fusedUop.getUnfusedUops():
-            uop.allocated = clock
             if not uop.possiblePorts:
                uop.executed = clock
-               #for reg in uop.renamedOutputOperands:
-               #   reg.ready = clock
 
 
 class Scheduler:
    def __init__(self):
       self.portQueues = {p:deque() for p in allPorts}
+      self.portUsage = {p:0  for p in allPorts}
+      self.uopsDispatchedInPrevCycle = [] # the port usage counter is decreased one cycle after uops are issued
       self.inflightUops = []
 
+   def isFull(self):
+      return sum(len(q) for q in self.portQueues.values()) + issue_Width > RS_Width
+
    def cycle(self, newUops):
+      self.addNewUops(newUops)      
       self.processInflightUops()
-      self.dispatchUops()
-      self.addNewUops(newUops)
+      self.dispatchUops()      
 
    def dispatchUops(self):
+      uopsDispatched = []
       for port, queue in self.portQueues.items():
          for uop in queue:
-            if not uop.renamedInputOperands or any((op.ready is not None) for op in uop.renamedInputOperands): # best-case assumption
+            if uop.issued + issue_dispatch_delay > clock:
+               continue
+            allOperandsReady = all((renamedOp.ready() is not None) for _, renamedOp in uop.inputOperands)
+            if allOperandsReady: # worst-case assumption
                uop.dispatched = clock
                queue.remove(uop)
-               self.inflightUops.append(uop)
+               uopsDispatched.append(uop)
                break
+      self.inflightUops.extend(uopsDispatched)
+      for uop in self.uopsDispatchedInPrevCycle:
+         self.portUsage[uop.actualPort] -= 1
+      self.uopsDispatchedInPrevCycle = uopsDispatched
 
    def processInflightUops(self):
       for uop in self.inflightUops:
-         if any((op.ready is None) for op in uop.renamedInputOperands):
-            continue
+         '''
          firstDispatchTime = min(uop2.dispatched for uop2 in uop.relatedUops)
          newReadyOutputOperands = set(oi for oi, op in enumerate(uop.renamedOutputOperands) if uop.renamedOutputOperands[oi].ready is None)
          for (ii,oi), l in uop.latencies.items():
@@ -261,17 +328,35 @@ class Scheduler:
                newReadyOutputOperands.remove(oi)
          for oi in newReadyOutputOperands:
             uop.renamedOutputOperands[oi].ready = clock
-         if all((op.ready is not None) for op in uop.renamedOutputOperands):
+         '''
+         if all((renamedOp.ready() is not None) for _, renamedOp in uop.outputOperands):
             uop.executed = clock
       self.inflightUops = [u for u in self.inflightUops if u.executed is None]
 
    def addNewUops(self, newUops):
-      for uop in newUops:
-         #minPortUsage = min(len(q) for p, q in self.portQueues.items() if p in uop.possiblePorts)
-         #portCandidates = [p for p, q in self.portQueues.items() if (p in uop.possiblePorts) and (len(q) == minPortUsage)]
-         port = min(((p,q) for p, q in self.portQueues.items() if p in uop.possiblePorts), key=lambda x: len(x[1]))[0] #random.choice(portCandidates)
-         self.portQueues[port].append(uop)
-         uop.actualPort = port
+      #print len(newUops)
+      prevPortUsage = dict(self.portUsage)
+      for issueSlot, fusedUop in enumerate(newUops):
+         for uop in fusedUop.getUnfusedUops():
+            if not uop.possiblePorts:
+               continue
+            applicablePorts = [(p,u) for p, u in prevPortUsage.items() if p in uop.possiblePorts]
+            minPort, minPortUsage = min(applicablePorts, key=lambda x: (x[1], -int(x[0]))) # port with minimum usage so far
+            
+            if issueSlot % 2 == 0 or len(applicablePorts) == 1:
+               port = minPort
+            else:
+               remApplicablePorts = [(p, u) for p, u in applicablePorts if p != minPort]
+               min2Port, min2PortUsage = min(remApplicablePorts, key=lambda x: (x[1], -int(x[0]))) # port with second smallest usage so far
+               if min2PortUsage >= minPortUsage + 3:
+                  port = minPort
+               else:
+                  port = min2Port
+
+            #print str(issueSlot) + ': ' + str(port)
+            self.portQueues[port].append(uop)
+            self.portUsage[port] += 1
+            uop.actualPort = port
 
 
 def getAllPorts():
@@ -301,21 +386,26 @@ def getMemAddr(memAddrAsm):
 def adjustLatencies(instructions):
    prevWriteToReg = dict() # reg -> instr
    for instr in instructions:
-      for outOp in instr.outputOperands:
-         if isinstance(outOp, RegOperand):
+      for outOp in instr.outputRegOperands:
+         if instr.isZeroLatencyMovInstr():
+            prevWriteToReg[getCanonicalReg(outOp.reg)] = prevWriteToReg.get(getCanonicalReg(instr.inputRegOperands[0].reg), instr)
+         else:
             prevWriteToReg[getCanonicalReg(outOp.reg)] = instr
    for instr in instructions:
-      for inOp in instr.inputOperands:
-         if isinstance(inOp, MemOperand):
-            memAddr = inOp.memAddr
-            if arch in ['SNB', 'IVB', 'HSW', 'BDW', 'SKL', 'KBL', 'CFL', 'SKX']:
-               if (memAddr.index is None) and (memAddr.displacement < 2048):
-                  if (memAddr.base in prevWriteToReg) and (prevWriteToReg[memAddr.base].instrStr in ['MOV (R64, M64)', 'MOV (RAX, M64)']):
-                     for inI in instr.indexesOfAddrRegs:
-                        for outI, _ in enumerate(instr.outputOperands):
-                           instr.latencies[(inI, outI)] -= 1
-      for outOp in instr.outputOperands:
-         if isinstance(outOp, RegOperand):
+      for inOp in instr.inputMemOperands:
+         memAddr = inOp.memAddr
+         if arch in ['SNB', 'IVB', 'HSW', 'BDW', 'SKL', 'KBL', 'CFL', 'SKX']:
+            if (memAddr.base is not None) and (memAddr.index is None) and (0 <= memAddr.displacement < 2048):
+               canonicalBaseReg = getCanonicalReg(memAddr.base)
+               if (canonicalBaseReg in prevWriteToReg) and (prevWriteToReg[canonicalBaseReg].instrStr in ['MOV (R64, M64)', 'MOV (RAX, M64)',
+                                                                                                          'MOV (R32, M32)', 'MOV (EAX, M32)']):
+                  for memAddrOp in instr.memAddrOperands:
+                     for outputOp in instr.outputRegOperands + instr.outputMemOperands:
+                        instr.latencies[(memAddrOp, outputOp)] -= 1
+      for outOp in instr.outputRegOperands:
+         if instr.isZeroLatencyMovInstr():
+            prevWriteToReg[getCanonicalReg(outOp.reg)] = prevWriteToReg.get(getCanonicalReg(instr.inputRegOperands[0].reg), instr)
+         else:
             prevWriteToReg[getCanonicalReg(outOp.reg)] = instr
 
 
@@ -342,6 +432,7 @@ def getInstructions(filename, rawFile, iacaMarkers, instrDataDict):
             uopsMS = instrData.get('uopsMS', 0)
             latData = instrData.get('lat', dict())
             portData = instrData.get('ports', {})
+            complexDecoder = instrData.get('complDec', False)
             if sameReg:
                uops = instrData.get('uops_SR', uops)
                retireSlots = instrData.get('retSlots_SR', retireSlots)
@@ -349,51 +440,67 @@ def getInstructions(filename, rawFile, iacaMarkers, instrDataDict):
                uopsMS = instrData.get('uopsMS_SR', uopsMS)
                latData = instrData.get('lat_SR', latData)
                portData = instrData.get('ports_SR', portData)
+               complexDecoder = instrData.get('complDec_SR', complexDecoder)
             elif usesIndexedAddr:
                uops = instrData.get('uops_I', uops)
                retireSlots = instrData.get('retSlots_I', retireSlots)
                uopsMITE = instrData.get('uopsMITE_I', uopsMITE)
                uopsMS = instrData.get('uopsMS_I', uopsMS)
                portData = instrData.get('ports_I', portData)
+               complexDecoder = instrData.get('complDec_I', complexDecoder)
             nLaminatedDomainUops = uopsMITE + uopsMS
 
-            instrInputRegOperands = [(n,r) for n, r in instrD.regOperands.items() if (not 'STACK' in r) and (('R' in instrD.rw[n]) or ('CW' in instrD.rw[n])
-                                                                                                                             or (getRegSize(r) in [8, 16]))]
+            instrInputRegOperands = [(n,r) for n, r in instrD.regOperands.items() if (not 'IP' in r) and (not 'STACK' in r) and (('R' in instrD.rw[n]) or
+                                                                                                        ('CW' in instrD.rw[n]) or (getRegSize(r) in [8, 16]))]
             instrInputMemOperands = [(n,m) for n, m in instrD.memOperands.items() if ('R' in instrD.rw[n]) or ('CW' in instrD.rw[n])]
-            instrOutputRegOperands = [(n, r) for n, r in instrD.regOperands.items() if (not 'STACK' in r) and ('W' in instrD.rw[n])]
+            instrOutputRegOperands = [(n, r) for n, r in instrD.regOperands.items() if (not 'IP' in r) and (not 'STACK' in r) and ('W' in instrD.rw[n])]
             instrOutputMemOperands = [(n, m) for n, m in instrD.memOperands.items() if 'W' in instrD.rw[n]]
             instrOutputOperands = instrOutputRegOperands + instrOutputMemOperands
 
-            inputOperands = []
-            outputOperands = [RegOperand(r) for _, r in instrOutputRegOperands] + [MemOperand(getMemAddr(m)) for _, m in instrOutputMemOperands]
-            indexesOfAddrRegs = []
-
+            inputRegOperands = []
+            inputMemOperands = []            
+            outputRegOperands = []
+            outputMemOperands = []
+            memAddrOperands = []
+            
+            outputOperandsDict = dict()
+            for n, r in instrOutputRegOperands:
+               regOp = RegOperand(r)
+               outputRegOperands.append(regOp)
+               outputOperandsDict[n] = regOp
+            for n, m in instrOutputMemOperands:
+               memOp = MemOperand(getMemAddr(m))
+               outputMemOperands.append(memOp)
+               outputOperandsDict[n] = memOp
+               
             latencies = dict()
             for inpN, inpR in instrInputRegOperands:
-               inputOperands.append(RegOperand(inpR))
-               for oi, (outN, _) in enumerate(instrOutputOperands):
-                  latencies[(len(inputOperands)-1, oi)] = latData.get((inpN, outN), 1)
+               regOp = RegOperand(inpR)
+               inputRegOperands.append(regOp)
+               for outN, _ in instrOutputOperands:
+                  latencies[(regOp, outputOperandsDict[outN])] = latData.get((inpN, outN), 1)
 
             for inpN, inpM in instrInputMemOperands:
                if 'AGEN' in inpN: continue
-               memAddr = getMemAddr(inpM)
-               inputOperands.append(MemOperand(memAddr))
-               for oi, (outN, _) in enumerate(instrOutputOperands):
-                  latencies[(len(inputOperands)-1, oi)] = latData.get((inpN, outN, 'mem'), 1)
+               memOp = MemOperand(getMemAddr(inpM))
+               inputMemOperands.append(memOp)
+               for outN, _ in instrOutputOperands:
+                  latencies[(memOp, outputOperandsDict[outN])] = latData.get((inpN, outN, 'mem'), 1)
 
             if not modifiesStack:
                for inpN, inpM in set(instrInputMemOperands + instrOutputMemOperands):
                   memAddr = getMemAddr(inpM)
                   for reg, addrType in [(memAddr.base, 'addr'), (memAddr.index, 'addrI')]:
-                     if reg is None: continue
-                     inputOperands.append(RegOperand(reg))
-                     indexesOfAddrRegs.append(len(inputOperands)-1)
-                     for oi, (outN, _) in enumerate(instrOutputOperands):
-                        latencies[(len(inputOperands)-1, oi)] = latData.get((inpN, outN, addrType), 1)
+                     if (reg is None) or ('IP' in reg): continue
+                     regOp = RegOperand(reg)
+                     memAddrOperands.append(regOp)
+                     for outN, _ in instrOutputOperands:
+                        latencies[(regOp, outputOperandsDict[outN])] = latData.get((inpN, outN, addrType), 1)
 
-            instruction = Instr(instrD.asm, instrD.opcode, nPrefixes, instrData['string'], portData, uops, retireSlots, nLaminatedDomainUops, inputOperands,
-                                indexesOfAddrRegs, outputOperands, latencies, lcpStall, modifiesStack, instrData.get('macroFusible', set()))
-            print instruction
+            instruction = Instr(instrD.asm, instrD.opcode, nPrefixes, instrData['string'], portData, uops, retireSlots, nLaminatedDomainUops, inputRegOperands,
+                                inputMemOperands, outputRegOperands, outputMemOperands, memAddrOperands, latencies, lcpStall, modifiesStack,
+                                complexDecoder, instrData.get('macroFusible', set()))
+            #print instruction
             break
 
       if instruction is None:
@@ -426,74 +533,85 @@ def UopGenerator(instructions):
       for instr in instructions:
          if instr.macroFused: continue
 
+         allRegOperands = instr.inputRegOperands + instr.outputRegOperands + instr.memAddrOperands
+      
          stackSynchUop = None
-         if (stackPtrImplicitlyModified and
-               any((getCanonicalReg(op.reg) == 'RSP') for op in instr.inputOperands+instr.outputOperands if isinstance(op, RegOperand))):
-            renamedInputOperand = renameDict.get('RSP', RenamedOperand(-1))
+         if stackPtrImplicitlyModified and any((getCanonicalReg(op.reg) == 'RSP') for op in allRegOperands):
+            renamedInputOperand = renameDict.get('RSP', RenamedOperand())
             renamedOutputOperand = RenamedOperand()
             renameDict['RSP'] = renamedOutputOperand
             stackSynchUop = StackSynchUop(instr, rnd, renamedInputOperand, renamedOutputOperand)
+            renamedOutputOperand.uops = [stackSynchUop]
             stackPtrImplicitlyModified = False
 
          if instr.modifiesStack:
             stackPtrImplicitlyModified = True
 
-         renamedInputOperands = []
-         renamedOutputOperands = []
+         renamedInputRegOperands = []         
+         renamedOutputRegOperands = []
+         renamedInputMemOperands = []
+         renamedOutputMemOperands = []
+         renamedMemAddrOperands = []
+         
          if instr.uops:
-            for op in instr.inputOperands: # ToDo: partial register stalls
-               if isinstance(op, RegOperand):
-                  key = getCanonicalReg(op.reg)
-               else:
-                  key = tuple(renameDict.get(x, x) for x in op.memAddr)
+            for op in instr.inputRegOperands: # ToDo: partial register stalls
+               key = getCanonicalReg(op.reg)
                if not key in renameDict:
-                  renameDict[key] = RenamedOperand(-1)
-               renamedInputOperands.append(renameDict[key])
-            for op in instr.outputOperands:
-               if isinstance(op, RegOperand):
-                  key = getCanonicalReg(op.reg)
-               else:
-                  key = tuple(renameDict.get(x, x) for x in op.memAddr)
-               if key == 'RIP':
-                  renamedOp = RenamedOperand(-1)
-               else:
-                  renamedOp = RenamedOperand()
+                  renameDict[key] = RenamedOperand(op)
+               renamedInputRegOperands.append((op, renameDict[key]))
+            for op in instr.memAddrOperands:
+               key = getCanonicalReg(op.reg)
+               if not key in renameDict:
+                  renameDict[key] = RenamedOperand(op)
+               renamedMemAddrOperands.append((op, renameDict[key]))
+            for op in instr.inputMemOperands:
+               key = tuple(renameDict.get(x, x) for x in op.memAddr)
+               if not key in renameDict:
+                  renameDict[key] = RenamedOperand(op)
+               renamedInputMemOperands.append((op, renameDict[key]))
+            for op in instr.outputRegOperands:
+               renamedOp = RenamedOperand(op)
+               renameDict[getCanonicalReg(op.reg)] = renamedOp
+               renamedOutputRegOperands.append((op, renamedOp))
+            for op in instr.outputMemOperands:
+               key = tuple(renameDict.get(x, x) for x in op.memAddr)
+               renamedOp = RenamedOperand(op)
                renameDict[key] = renamedOp
-               renamedOutputOperands.append(renamedOp)
-
+               renamedOutputMemOperands.append((op, renamedOp))
          else:
-            if (len(instr.inputOperands) == 1 and len(instr.outputOperands) == 1 and isinstance(instr.inputOperands[0], RegOperand) and
-                                                                                     isinstance(instr.outputOperands[0], RegOperand)):
-               # Zero-latency mov
-               canonicalInpReg = getCanonicalReg(instr.inputOperands[0].reg)
-               canonicalOutReg = getCanonicalReg(instr.outputOperands[0].reg)
+            if instr.isZeroLatencyMovInstr():
+               canonicalInpReg = getCanonicalReg(instr.inputRegOperands[0].reg)
+               canonicalOutReg = getCanonicalReg(instr.outputRegOperands[0].reg)
                if not canonicalInpReg in renameDict:
-                  renameDict[canonicalInpReg] = RenamedOperand(-1)
+                  renameDict[canonicalInpReg] = RenamedOperand()
                renameDict[canonicalOutReg] = renameDict[canonicalInpReg]
             else:
-               for op in instr.outputOperands:
-                  if isinstance(op, RegOperand):
-                     key = getCanonicalReg(op.reg)
-                  else:
-                     key = tuple(renameDict.get(x, x) for x in op.memAddr)
-                  renamedOp = RenamedOperand()
-                  renamedOp.ready = -1
-                  renameDict[key] = renamedOp
-
+               for op in instr.outputRegOperands:
+                  renameDict[getCanonicalReg(op.reg)] = RenamedOperand()
+                  
          unfusedUops = []
          remUops = instr.retireSlots
          for pc, n in instr.portData.items():
             remUops -= n
             for _ in range(0, n):
                ports = list(pc)
-               unfusedUops.append(Uop(instr, rnd, ports, renamedInputOperands, renamedOutputOperands, dict(instr.latencies)))
+               if any((p in ports) for p in ['2', '3', '7', '8']):
+                  applicableInputOperands = renamedMemAddrOperands + renamedInputMemOperands # ToDo: distinguish between load and store operations
+                  applicableOutputOperands = renamedOutputRegOperands + renamedOutputMemOperands
+               elif any((p in ports) for p in ['4', '9']):
+                  applicableInputOperands = renamedInputRegOperands + renamedMemAddrOperands + renamedInputMemOperands
+                  applicableOutputOperands = renamedOutputMemOperands
+               else:
+                  applicableInputOperands = renamedInputRegOperands + renamedMemAddrOperands + renamedInputMemOperands
+                  applicableOutputOperands = renamedOutputRegOperands + renamedOutputMemOperands
+               uop = Uop(instr, rnd, ports, applicableInputOperands, applicableOutputOperands)
+               unfusedUops.append(uop)
+               for _, renamedOutputOp in applicableOutputOperands:
+                  renamedOutputOp.uops.append(uop)
+                  
          for _ in range(0, remUops):
-            uop = Uop(instr, rnd, None, renamedInputOperands, renamedOutputOperands, dict(instr.latencies))
+            uop = Uop(instr, rnd, None, [], [])
             unfusedUops.append(uop)
-         for uop in unfusedUops:
-            uop.relatedUops = list(unfusedUops)
-
-         #uopsRoundDict[instr][ri].extend(unfusedUops)
 
          fusedDomainUops = []
          for _ in range(0, instr.retireSlots-1):
@@ -542,6 +660,70 @@ def printPortUsage(instructions, uopsForRound):
       print formatStr.format(uopsCol, *portUsageL) + ' ' + instr.asm
 
 
+def writeHtmlFile(filename, title, head, body):
+   with open(filename, "w") as f:
+      f.write('<html>\n'
+              '<head>\n'
+              '<title>' + title + '</title>\n'
+              + head +
+              '</head>\n'
+              '<body>\n'
+              + body +
+              '</body>\n'
+              '</html>\n')
+
+
+def generateHTMLTraceTable(filename, instructions, uopsForRound, maxCycle):
+   style = []
+   style.append('<style>')
+   style.append('table {border-collapse: collapse}')   
+   style.append('table, td, th {border: 1px solid black}')
+   style.append('th {text-align: left; padding: 6px}')
+   style.append('td {text-align: center}')
+   style.append('code {white-space: nowrap}')   
+   style.append('</style>')
+   table = []
+   table.append('<table>')
+   table.append('<tr>')
+   table.append('<th rowspan="2">It.</th>')
+   table.append('<th rowspan="2">Instruction</th>')
+   table.append('<th colspan="2" style="text-align:center">&mu;ops</th>')
+   table.append('<th rowspan="2" colspan="{}">Cycles</th>'.format(maxCycle+1))
+   table.append('</tr>')
+   table.append('<tr>')
+   table.append('<th style="text-align:center">Possible Ports</th>')
+   table.append('<th style="text-align:center">Actual Port</th>')   
+   table.append('</tr>')
+
+   nUops = sum(len(uops) for uops in uopsForRound[0].values())
+   for rnd, uopsDict in enumerate(uopsForRound):
+      table.append('<tr style="border-top: 2px solid black">')
+      table.append('<td rowspan="{}">{}</td>'.format(nUops, rnd))
+      for instrI, instr in enumerate(instructions):
+         if instrI > 0:
+            table.append('<tr>')
+         table.append('<td rowspan=\"{}\" style="text-align:left"><code>{}</code></td>'.format(len(uopsDict[instr]), instr.asm))
+         for uopI, uop in enumerate(uopsDict[instr]):
+            if uopI > 0:
+               table.append('<tr>')
+            table.append('<td>{{{}}}</td>'.format(','.join(uop.possiblePorts) if uop.possiblePorts else '-'))
+            table.append('<td>{}</td>'.format(uop.actualPort if uop.actualPort else '-'))
+
+            uopEvents = ['' for _ in range(0,maxCycle+1)]
+            for evCycle, ev in [(uop.predecoded, 'P'), (uop.allocated, 'A'), (uop.issued, 'I'), (uop.dispatched, 'D'), (uop.executed, 'E'), (uop.retired, 'R')]:
+               if evCycle is not None and evCycle <= maxCycle:
+                  uopEvents[evCycle] += ev
+                  
+            for ev in uopEvents:
+               table.append('<td>{}</td>'.format(ev))
+            
+            table.append('</tr>')
+      
+
+   table.append('</table>')
+   writeHtmlFile(filename, 'Trace', '\n'.join(style), '\n'.join(table))
+   
+
 # Disassembles a binary and finds for each instruction the corresponding entry in the XML file.
 # With the -iacaMarkers option, only the parts of the code that are between the IACA markers are considered.
 def main():
@@ -550,6 +732,7 @@ def main():
    parser.add_argument("-iacaMarkers", help="Use IACA markers", action='store_true')
    parser.add_argument("-raw", help="raw file", action='store_true')
    parser.add_argument("-arch", help="Microarchitecture", default='CFL')
+   parser.add_argument("-trace", help="HTML trace", nargs='?', const='trace.html')
    args = parser.parse_args()
 
    global arch, allPorts
@@ -573,8 +756,9 @@ def main():
    frontEnd = FrontEnd(uopGenerator, rb, scheduler)
 
    nRounds = 150
-   uopsForRound = [{instr: [] for instr in instructions} for _ in range(0, nRounds)]
-
+   uopsForRound = []
+   
+   
    done = False
    while True:
       frontEnd.cycle()
@@ -584,35 +768,39 @@ def main():
          for uop in fusedUop.getUnfusedUops():
             instr = uop.instr
             rnd = uop.rnd
-            if rnd >= nRounds:
+            if rnd >= nRounds and clock > 500:
                done = True
                break
+            if rnd >= len(uopsForRound):
+               uopsForRound.append({instr: [] for instr in instructions})
             uopsForRound[rnd][instr].append(uop)
+      
       if done:
          break
 
-      clock += 1
+      clock += 1      
 
    TP = None
 
    firstRelevantRound = 50
-   lastRelevantRound = nRounds-1
+   lastRelevantRound = len(uopsForRound)-2 # last round may be incomplete, thus -2   
    for rnd in range(lastRelevantRound, lastRelevantRound-5, -1):
       if uopsForRound[firstRelevantRound][lastApplicableInstr][-1].retireIdx == uopsForRound[rnd][lastApplicableInstr][-1].retireIdx:
          lastRelevantRound = rnd
          break
 
-   uopsForRound = uopsForRound[firstRelevantRound:(lastRelevantRound+1)]
+   uopsForRelRound = uopsForRound[firstRelevantRound:(lastRelevantRound+1)]
 
-   TP = float(uopsForRound[-1][lastApplicableInstr][-1].retired - uopsForRound[0][lastApplicableInstr][-1].retired) / (len(uopsForRound)-1)
+   TP = float(uopsForRelRound[-1][lastApplicableInstr][-1].retired - uopsForRelRound[0][lastApplicableInstr][-1].retired) / (len(uopsForRelRound)-1)
    #TP = max(float((uop2.retired-uop1.retired)) for d in uopsRoundDict.values() for (uop1, uop2) in zip(d[25], d[nRounds-25]))/(nRounds-50)
 
    print 'TP: {:.2f}'.format(TP)
    print ''
 
-   printPortUsage(instructions, uopsForRound)
+   printPortUsage(instructions, uopsForRelRound)
 
-
+   if args.trace is not None:
+      generateHTMLTraceTable(args.trace, instructions, uopsForRound, clock-1)
 
 if __name__ == "__main__":
     main()
