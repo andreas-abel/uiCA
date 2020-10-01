@@ -45,10 +45,12 @@ def main():
                   TPLoop = float(measurementNode.attrib['TP_loop'+mSuffix])
                   if (uopsMite + uopsMS > 1) or ((.9 < TPUnrolled < 1.1) and (TPLoop < .8)):
                      instrData['complDec'+iSuffix] = True
-               
+
                ports = measurementNode.attrib.get('ports'+mSuffix)
-               if ports is not None:
-                  instrData['ports'+iSuffix] = {p.replace('p', ''): int(n) for np in ports.split('+') for n, p in [np.split('*')]} # ToDo: AMD
+               if ports is not None: # ToDo: AMD
+                  if XMLInstr.attrib['category'] == 'COND_BR' and ports == '1*p06':
+                     ports = '1*p6' # taken branches can only use port 6
+                  instrData['ports'+iSuffix] = {p.replace('p', ''): int(n) for np in ports.split('+') for n, p in [np.split('*')]}
                elif instrData.get('uops'+iSuffix, -1) == 0:
                   instrData['ports'+iSuffix] = {}
 

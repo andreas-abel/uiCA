@@ -1,4 +1,5 @@
 import re
+from collections import namedtuple
 
 GPRegs = {'AH', 'AL', 'AX', 'BH', 'BL', 'BP', 'BPL', 'BX', 'CH', 'CL', 'CX', 'DH', 'DI', 'DIL', 'DL', 'DX', 'EAX',
    'EBP', 'EBX', 'ECX', 'EDI', 'EDX', 'ESI', 'ESP', 'R10', 'R10B', 'R10D', 'R10W', 'R11', 'R11B', 'R11D', 'R11W', 'R12',
@@ -141,3 +142,20 @@ def getRegSize(reg):
    elif reg.startswith('YMM'): return 256
    elif reg.startswith('ZMM'): return 512
    else: return -1
+
+MemAddr = namedtuple('MemAddr', ['base', 'index', 'scale', 'displacement'])
+def getMemAddr(memAddrAsm):
+   base = index = None
+   displacement = 0
+   scale = 1
+   for c in re.split('\+|-', re.search('\[(.*)\]', memAddrAsm).group(1)):
+      if '0x' in c:
+         displacement = int(c, 0)
+         if '-0x' in memAddrAsm:
+            displacement = -displacement
+      elif '*' in c:
+         index, scale = c.split('*')
+         scale = int(scale)
+      else:
+         base = c
+   return MemAddr(base, index, scale, displacement)
