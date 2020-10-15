@@ -34,7 +34,7 @@ def main():
             instrData['string'] = instrString
 
             for mSuffix, iSuffix in [('', ''), ('_same_reg', '_SR'), ('_indexed', '_I')]:
-               for mKey, iKey in [('uops', 'uops'), ('uops_retire_slots', 'retSlots'), ('uops_MITE', 'uopsMITE'), ('uops_MS', 'uopsMS')]:
+               for mKey, iKey in [('uops', 'uops'), ('uops_retire_slots', 'retSlots'), ('uops_MITE', 'uopsMITE'), ('uops_MS', 'uopsMS'), ('div_cycles', 'divC')]:
                   mValue = measurementNode.attrib.get(mKey+mSuffix)
                   if mValue is not None:
                      instrData[iKey+iSuffix] = int(mValue)
@@ -72,8 +72,8 @@ def main():
                   latData[(startOp, targetOp)] = int(latNode.attrib['cycles'])
                if 'cycles_same_reg' in latNode.attrib:
                   latDataSameReg[(startOp, targetOp)] = int(latNode.attrib['cycles_same_reg'])
-               if 'max_cycles' in latNode.attrib:
-                  latData[(startOp, targetOp)] = int(latNode.attrib['max_cycles'])
+               if 'min_cycles' in latNode.attrib:
+                  latData[(startOp, targetOp)] = int(latNode.attrib['min_cycles'])
                if 'cycles_addr' in latNode.attrib:
                   latData[(startOp, targetOp, 'addr')] = int(latNode.attrib['cycles_addr'])
                if 'cycles_addr_index' in latNode.attrib:
