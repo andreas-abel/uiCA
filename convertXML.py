@@ -34,17 +34,11 @@ def main():
             instrData['string'] = instrString
 
             for mSuffix, iSuffix in [('', ''), ('_same_reg', '_SR'), ('_indexed', '_I')]:
-               for mKey, iKey in [('uops', 'uops'), ('uops_retire_slots', 'retSlots'), ('uops_MITE', 'uopsMITE'), ('uops_MS', 'uopsMS'), ('div_cycles', 'divC')]:
+               for mKey, iKey in [('uops', 'uops'), ('uops_retire_slots', 'retSlots'), ('uops_MITE', 'uopsMITE'), ('uops_MS', 'uopsMS'),
+                                  ('div_cycles', 'divC'), ('complex_decoder', 'complDec'), ('available_simple_decoders', 'sDec')]:
                   mValue = measurementNode.attrib.get(mKey+mSuffix)
                   if mValue is not None:
                      instrData[iKey+iSuffix] = int(mValue)
-               if 'TP_unrolled'+mSuffix in measurementNode.attrib:
-                  uopsMite = int(measurementNode.attrib.get('uops_MITE'+mSuffix, 0))
-                  uopsMS = int(measurementNode.attrib.get('uops_MS'+mSuffix, 0))
-                  TPUnrolled = float(measurementNode.attrib['TP_unrolled'+mSuffix])
-                  TPLoop = float(measurementNode.attrib['TP_loop'+mSuffix])
-                  if (uopsMite + uopsMS > 1) or ((.9 < TPUnrolled < 1.1) and (TPLoop < .8)):
-                     instrData['complDec'+iSuffix] = True
 
                ports = measurementNode.attrib.get('ports'+mSuffix)
                if ports is not None: # ToDo: AMD
