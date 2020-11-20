@@ -36,7 +36,10 @@ def main():
             for mSuffix, iSuffix in [('', ''), ('_same_reg', '_SR'), ('_indexed', '_I')]:
                for mKey, iKey in [('uops', 'uops'), ('uops_retire_slots', 'retSlots'), ('uops_MITE', 'uopsMITE'), ('uops_MS', 'uopsMS'),
                                   ('div_cycles', 'divC'), ('complex_decoder', 'complDec'), ('available_simple_decoders', 'sDec')]:
-                  mValue = measurementNode.attrib.get(mKey+mSuffix)
+                  if archNode.attrib['name'] == 'HSW' and mKey == 'div_cycles' and mKey+mSuffix in measurementNode.attrib:
+                     mValue = int(float(measurementNode.attrib.get('TP_loop'+mSuffix))) # ToDo: div_cycles ctr. on Haswell seems wrong
+                  else:
+                     mValue = measurementNode.attrib.get(mKey+mSuffix)
                   if mValue is not None:
                      instrData[iKey+iSuffix] = int(mValue)
 
