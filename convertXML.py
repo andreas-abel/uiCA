@@ -32,6 +32,8 @@ def main():
 
             instrData['attributes'] = attr
             instrData['string'] = instrString
+            if XMLInstr.attrib.get('locked', '') == '1':
+               instrData['locked'] = 1
 
             for mSuffix, iSuffix in [('', ''), ('_same_reg', '_SR'), ('_indexed', '_I')]:
                for mKey, iKey in [('uops', 'uops'), ('uops_retire_slots', 'retSlots'), ('uops_MITE', 'uopsMITE'), ('uops_MS', 'uopsMS'),
@@ -42,6 +44,12 @@ def main():
                      mValue = measurementNode.attrib.get(mKey+mSuffix)
                   if mValue is not None:
                      instrData[iKey+iSuffix] = int(mValue)
+               if instrString in ['CPUID', 'MFENCE', 'PAUSE', 'RDTSC'] or XMLInstr.attrib.get('locked', '') == '1':
+                  TP_loop = measurementNode.attrib.get('TP_loop'+mSuffix)
+                  TP_unrolled = measurementNode.attrib.get('TP_unrolled'+mSuffix)
+                  TPs = [int(float(tp)) for tp in [TP_loop, TP_unrolled] if tp is not None]
+                  if TPs:
+                     instrData['TP'+iSuffix] = min(TPs)
 
                ports = measurementNode.attrib.get('ports'+mSuffix)
                if ports is not None: # ToDo: AMD
@@ -82,6 +90,7 @@ def main():
                instrData['lat'] = latData
             if latDataSameReg:
                instrData['lat_SR'] = latDataSameReg
+
 
    path = 'instrData'
 
