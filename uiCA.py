@@ -6,7 +6,7 @@ import os
 import random
 import re
 import sys
-from collections import Counter, defaultdict, deque, namedtuple
+from collections import Counter, defaultdict, deque, namedtuple, OrderedDict
 from heapq import heappop, heappush
 from itertools import chain, count
 from x64_lib import *
@@ -36,7 +36,7 @@ issue_dispatch_delay = 5
 
 class UopProperties:
    def __init__(self, instr, possiblePorts, inputOperands, outputOperands, divCycles=0, isLoadUop=False, isStoreAddressUop=False, isStoreDataUop=False,
-                isFirstUopOfInstr=False, isLastUopOfInstr=False):
+                isFirstUopOfInstr=False, isLastUopOfInstr=False, isRegMergeUop=False):
       self.instr = instr
       self.possiblePorts = possiblePorts
       self.inputOperands = inputOperands
@@ -47,6 +47,7 @@ class UopProperties:
       self.isStoreDataUop = isStoreDataUop
       self.isFirstUopOfInstr = isFirstUopOfInstr
       self.isLastUopOfInstr = isLastUopOfInstr
+      self.isRegMergeUop = isRegMergeUop
 
 
 class Uop:
@@ -142,6 +143,7 @@ class Instr:
       self.macroFusedWithNextInstr = macroFusedWithNextInstr
       self.UopPropertiesList = [] # list with UopProperties for each (unfused domain) uop
       self.requiresStackSynchUop = False
+      self.regMergeUopPropertiesList = []
 
    def __repr__(self):
        return "Instr: " + str(self.__dict__)
@@ -233,7 +235,10 @@ class RenamedOperand:
 
 
 class Renamer:
-   def __init__(self):
+   def __init__(self, IDQ, reorderBuffer):
+      self.IDQ = IDQ
+      self.reorderBuffer = reorderBuffer
+
       self.renameDict = {}
 
       # renamed operands written by current instr.; this is necessary because we we generally don't know which uop of an instruction writes an operand
@@ -255,15 +260,41 @@ class Renamer:
 
       self.renamerActiveCycle = 0
 
-   def cycle(self, uops):
+      self.lastRegMergeIssued = None # last uop for which register merge uops were issued
+
+   def cycle(self):
       self.renamerActiveCycle += 1
+
+      renamerUops = []
+      while self.IDQ:
+         lamUop = self.IDQ[0]
+         #if (lamUop.getUnfusedUops()[0].idx == 0) and (len(self.IDQ) < IDQ_Width / 2):
+         #   break
+         firstUnfusedUop = lamUop.getUnfusedUops()[0]
+         regMergeProps = firstUnfusedUop.prop.instr.regMergeUopPropertiesList
+         if regMergeProps:
+            if renamerUops:
+               break
+            if self.lastRegMergeIssued != firstUnfusedUop:
+               for mergeProp in regMergeProps:
+                  renamerUops.append(Uop(mergeProp, firstUnfusedUop.rnd))
+               self.lastRegMergeIssued = firstUnfusedUop
+               break
+
+         if any((uop.prop.isFirstUopOfInstr and uop.prop.instr.isSerializingInstr) for uop in lamUop.getUnfusedUops()) and not self.reorderBuffer.isEmpty(): # ToDo :is the for loop necessary?
+            break
+         fusedUops = lamUop.getFusedUops()
+         if len(renamerUops) + len(fusedUops) > issue_Width:
+            break
+         renamerUops.extend(fusedUops)
+         self.IDQ.popleft()
 
       nGPRMoveEliminations = 0
       nSIMDMoveEliminations = 0
 
-      for fusedUop in uops:
+      for fusedUop in renamerUops:
          for uop in fusedUop.getUnfusedUops():
-            if uop.prop.instr.mayBeEliminated and (not isinstance(uop, StackSynchUop)):
+            if uop.prop.instr.mayBeEliminated and (not uop.prop.isRegMergeUop) and (not isinstance(uop, StackSynchUop)):
                canonicalInpReg = getCanonicalReg(uop.prop.instr.inputRegOperands[0].reg)
                canonicalOutReg = getCanonicalReg(uop.prop.instr.outputRegOperands[0].reg)
 
@@ -311,7 +342,7 @@ class Renamer:
                   for op in uop.prop.instr.outputRegOperands:
                      self.curInstrRndRenameDict[getCanonicalReg(op.reg)] = RenamedOperand()
 
-            if uop.prop.isLastUopOfInstr:
+            if uop.prop.isLastUopOfInstr or uop.prop.isRegMergeUop:
                for renOp, uopsForOp in self.curInstrRndUopsForRenamedOpDict.items():
                   renOp.setUops(uopsForOp)
 
@@ -347,7 +378,7 @@ class Renamer:
          if len(v) <= 1:
             del self.multiUseSIMDDict[k]
 
-      return uops
+      return renamerUops
 
    def getRenameDictKey(self, op, agen=False):
       if isinstance(op, RegOperand):
@@ -385,7 +416,7 @@ class Renamer:
 class FrontEnd:
    def __init__(self, instructions, reorderBuffer, scheduler, unroll):
       self.IDQ = deque()
-      self.renamer = Renamer()
+      self.renamer = Renamer(self.IDQ, reorderBuffer)
       self.reorderBuffer = reorderBuffer
       self.scheduler = scheduler
       self.unroll = unroll
@@ -411,28 +442,16 @@ class FrontEnd:
          if 0 in self.addressesInDSB:
             self.uopSource = 'DSB'
 
+      self.allGeneratedInstrInstances = []
+
    def cycle(self):
-      renamerUops = []
-      if len(self.IDQ) >= issue_Width and not self.reorderBuffer.isFull() and not self.scheduler.isFull(): # the first check seems to be wrong, but leads to better results
-         while self.IDQ:
-            lamUop = self.IDQ[0]
-            #if (lamUop.getUnfusedUops()[0].idx == 0) and (len(self.IDQ) < IDQ_Width / 2):
-            #   break
-
-            if any((uop.prop.isFirstUopOfInstr and uop.prop.instr.isSerializingInstr) for uop in lamUop.getUnfusedUops()) and not self.reorderBuffer.isEmpty():
-               break
-            fusedUops = lamUop.getFusedUops()
-            if len(renamerUops) + len(fusedUops) > issue_Width:
-               break
-            renamerUops.extend(fusedUops)
-            self.IDQ.popleft()
-
       issueUops = []
-      if renamerUops:
-         issueUops = self.renamer.cycle(renamerUops)
-         for fusedUop in issueUops:
-            for uop in fusedUop.getUnfusedUops():
-               uop.issued = clock
+      if not self.reorderBuffer.isFull() and not self.scheduler.isFull(): # len(self.IDQ) >= issue_Width and the first check seems to be wrong, but leads to better results
+         issueUops = self.renamer.cycle()
+
+      for fusedUop in issueUops:
+         for uop in fusedUop.getUnfusedUops():
+            uop.issued = clock
 
       self.reorderBuffer.cycle(issueUops)
       self.scheduler.cycle(issueUops)
@@ -502,6 +521,7 @@ class FrontEnd:
       return True
 
    def addNewCacheBlock(self, cacheBlock):
+      self.allGeneratedInstrInstances.extend(cacheBlock)
       B32Blocks = split64ByteBlockTo32ByteBlocks(cacheBlock)
       for B32Block in B32Blocks:
          if not B32Block: continue
@@ -606,6 +626,7 @@ class Decoder:
       while self.instructionQueue:
          instrI = self.instructionQueue[0]
          if instrI.instr.macroFusedWithPrevInstr:
+            self.instructionQueue.popleft()
             continue
          if instrI.uops[0].getUnfusedUops()[0].predecoded + predecodeDecodeDelay > clock:
             break
@@ -616,8 +637,8 @@ class Decoder:
                break
             if (len(self.instructionQueue) <= 1) or (self.instructionQueue[1].uops[0].getUnfusedUops()[0].predecoded + predecodeDecodeDelay > clock):
                break
-         if instrI.instr.macroFusibleWith and ():
-            break
+         #if instrI.instr.macroFusibleWith and ():
+         #   break
          self.instructionQueue.popleft()
 
          if instrI.instr.uopsMITE:
@@ -954,9 +975,9 @@ def getAllPorts():
 
 
 # must only be called once for a given list of instructions
-def adjustLatencies(instructions):
+def adjustLatenciesAndAddMergeUops(instructions):
    prevWriteToReg = dict() # reg -> instr
-   high8RegClean = {'RAX': False, 'RBX': False, 'RCX': False, 'RDX': False}
+   high8RegClean = {'RAX': True, 'RBX': True, 'RCX': True, 'RDX': True}
 
    def processInstrRegOutputs(instr):
       for outOp in instr.outputRegOperands:
@@ -966,11 +987,12 @@ def adjustLatencies(instructions):
          else:
             prevWriteToReg[canonicalOutReg] = instr
 
-         if canonicalOutReg in ['RAX', 'RBX', 'RCX', 'RDX']:
-            if outOp.reg in High8Regs:
-               high8RegClean[canonicalOutReg] = True
-            elif getRegSize(outOp.reg) > 8:
-               high8RegClean[canonicalOutReg] = False
+      for op in instr.inputRegOperands + instr.memAddrOperands + instr.outputRegOperands:
+         canonicalReg = getCanonicalReg(op.reg)
+         if (canonicalReg in ['RAX', 'RBX', 'RCX', 'RDX']) and (getRegSize(op.reg) > 8):
+            high8RegClean[canonicalReg] = True
+         elif (op.reg in High8Regs) and (op in instr.outputRegOperands):
+            high8RegClean[canonicalReg] = False
 
    for instr in instructions:
       processInstrRegOutputs(instr)
@@ -994,9 +1016,15 @@ def adjustLatencies(instructions):
             # the latency upper bound in the xml file is usually too pessimistic in these cases
             instr.latencies[(inOp, instr.outputMemOperands[0])] = instr.latencies[(inOp, instr.outputRegOperands[0])]
 
-      if any((not high8RegClean[getCanonicalReg(inOp.reg)]) for inOp in instr.inputRegOperands if inOp.reg in High8Regs):
+      if any(high8RegClean[getCanonicalReg(inOp.reg)] for inOp in instr.inputRegOperands if inOp.reg in High8Regs):
          for key in list(instr.latencies.keys()):
             instr.latencies[key] += 1
+
+      for inOp in instr.inputRegOperands + instr.memAddrOperands:
+         canonicalInReg = getCanonicalReg(inOp.reg)
+         if (canonicalInReg in ['RAX', 'RBX', 'RCX', 'RDX']) and (getRegSize(inOp.reg) > 8) and (not high8RegClean[canonicalInReg]):
+            regMergeUopProp = UopProperties(instr, ['1', '5'], [RegOperand(canonicalInReg)], [RegOperand(canonicalInReg)], isRegMergeUop=True)
+            instr.regMergeUopPropertiesList.append(regMergeUopProp)
 
       processInstrRegOutputs(instr)
 
@@ -1381,7 +1409,7 @@ def generateHTMLTraceTable(filename, instructions, uopsForRound, maxCycle):
             table.append('<td>{{{}}}</td>'.format(','.join(uop.prop.possiblePorts) if uop.prop.possiblePorts else '-'))
             table.append('<td>{}</td>'.format(uop.actualPort if uop.actualPort else '-'))
 
-            uopEvents = ['' for _ in range(0,maxCycle+1)]
+            uopEvents = ['' for _ in xrange(0,maxCycle+1)]
             for evCycle, ev in [(uop.predecoded, 'P'), (uop.addedToIDQ, 'Q'), (uop.issued, 'I'), (uop.readyForDispatch, 'r'), (uop.dispatched, 'D'), (uop.executed, 'E'), (uop.retired, 'R'),
                                 (max(op.getReadyCycle() for op in uop.renamedInputOperands) if uop.renamedInputOperands else 0, 'i'),
                                 (max(op.getReadyCycle() for op in uop.renamedOutputOperands) if uop.renamedOutputOperands else 0, 'o') ]:
@@ -1402,6 +1430,71 @@ def generateHTMLTraceTable(filename, instructions, uopsForRound, maxCycle):
    writeHtmlFile(filename, 'Trace', '\n'.join(style), '\n'.join(table))
 
 
+def generateHTMLGraph(filename, instructions, instrInstances, maxCycle):
+   from plotly.offline import plot
+   import plotly.graph_objects as go
+
+   head = ''
+
+   fig = go.Figure()
+   fig.update_xaxes(title_text='Cycle')
+
+   eventsDict = OrderedDict()
+
+   def addEvent(evtName, cycle):
+      if (cycle is not None) and (cycle <= maxCycle):
+         eventsDict[evtName][cycle] += 1
+
+   for evtName, evtAttrName in [('uops predecoded', 'predecoded'), ('uops added to IDQ', 'addedToIDQ')]:
+      eventsDict[evtName] = [0 for _ in xrange(0,maxCycle+1)]
+      for instrI in instrInstances:
+         for lamUop in instrI.uops:
+            cycle = getattr(lamUop.getUnfusedUops()[0], evtAttrName)
+            addEvent(evtName, cycle)
+
+   for evtName, evtAttrName in [('uops issued', 'issued'), ('uops retired', 'retired')]:
+      eventsDict[evtName] = [0 for _ in xrange(0,maxCycle+1)]
+      for instrI in instrInstances:
+         for lamUop in instrI.uops:
+            for fusedUop in lamUop.getFusedUops():
+               cycle = getattr(fusedUop.getUnfusedUops()[0], evtAttrName)
+               addEvent(evtName, cycle)
+
+   for evtName, evtAttrName in [('uops dispatched', 'dispatched'), ('uops executed', 'executed')]:
+      eventsDict[evtName] = [0 for _ in xrange(0,maxCycle+1)]
+      for instrI in instrInstances:
+         for lamUop in instrI.uops:
+            for uop in lamUop.getUnfusedUops():
+               cycle = getattr(uop, evtAttrName)
+               addEvent(evtName, cycle)
+
+   for port in getAllPorts():
+      eventsDict['uops port ' + port] = [0 for _ in xrange(0,maxCycle+1)]
+   for instrI in instrInstances:
+      for lamUop in instrI.uops:
+         for uop in lamUop.getUnfusedUops():
+            if uop.actualPort is not None:
+               evtName = 'uops port ' + uop.actualPort
+               cycle = uop.dispatched
+               addEvent(evtName, cycle)
+
+   for evtName, events in eventsDict.items():
+      cumulativeEvents = list(events)
+      for i in xrange(1,maxCycle+1):
+         cumulativeEvents[i] += cumulativeEvents[i-1]
+      fig.add_trace(go.Scatter(y=cumulativeEvents, mode='lines+markers', line_shape='hv', name=evtName))
+
+   config={'displayModeBar': True,
+           'modeBarButtonsToRemove': ['autoScale2d', 'select2d', 'lasso2d'],
+           'modeBarButtonsToAdd': [{'name': 'Toggle interpolation mode', 'icon': 'iconJS', 'click': 'interpolationJS'}]}
+   body = plot(fig, include_plotlyjs='cdn', output_type='div', config=config)
+
+   body = body.replace('"iconJS"', 'Plotly.Icons.drawline')
+   body = body.replace('"interpolationJS"', 'function (gd) {Plotly.restyle(gd, "line.shape", gd.data[0].line.shape == "hv" ? "linear" : "hv")}')
+
+   writeHtmlFile(filename, 'Graph', head, body)
+
+
 # Disassembles a binary and finds for each instruction the corresponding entry in the XML file.
 # With the -iacaMarkers option, only the parts of the code that are between the IACA markers are considered.
 def main():
@@ -1411,6 +1504,7 @@ def main():
    parser.add_argument("-raw", help="raw file", action='store_true')
    parser.add_argument("-arch", help="Microarchitecture", default='CFL')
    parser.add_argument("-trace", help="HTML trace", nargs='?', const='trace.html')
+   parser.add_argument("-graph", help="HTML graph", nargs='?', const='graph.html')
    parser.add_argument("-loop", help="loop", action='store_true')
    args = parser.parse_args()
 
@@ -1429,12 +1523,14 @@ def main():
       instrWithMoreThan2UopsDecodedAlone = True
       global pop5CRequiresComplexDecoder
       pop5CRequiresComplexDecoder = True
+      global RS_Width
+      RS_Width = 60
 
    instrDataDict = importlib.import_module('instrData.'+arch).instrData
 
    instructions = getInstructions(args.filename, args.raw, args.iacaMarkers, instrDataDict)
    lastApplicableInstr = [instr for instr in instructions if not instr.macroFusedWithPrevInstr][-1] # ignore macro-fused instr.
-   adjustLatencies(instructions)
+   adjustLatenciesAndAddMergeUops(instructions)
    computeUopProperties(instructions)
    #print instructions
 
@@ -1452,7 +1548,7 @@ def main():
    #   uopSource = DSB(uopGenerator, IDQ)
 
 
-   nRounds = 150
+   nRounds = 100 + 400/len(instructions)
    uopsForRound = []
 
 
@@ -1481,7 +1577,7 @@ def main():
 
    firstRelevantRound = 50
    lastRelevantRound = len(uopsForRound)-2 # last round may be incomplete, thus -2
-   for rnd in range(lastRelevantRound, lastRelevantRound-5, -1):
+   for rnd in xrange(lastRelevantRound, lastRelevantRound-5, -1):
       if uopsForRound[firstRelevantRound][lastApplicableInstr][-1].retireIdx == uopsForRound[rnd][lastApplicableInstr][-1].retireIdx:
          lastRelevantRound = rnd
          break
@@ -1498,6 +1594,9 @@ def main():
 
    if args.trace is not None:
       generateHTMLTraceTable(args.trace, instructions, uopsForRound, clock-1)
+
+   if args.graph is not None:
+      generateHTMLGraph(args.graph, instructions, frontEnd.allGeneratedInstrInstances, clock-1)
 
 if __name__ == "__main__":
     main()
