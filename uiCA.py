@@ -33,6 +33,9 @@ DSB_Width = 6
 IDQ_Width = 64
 issue_Width = 4
 issue_dispatch_delay = 5
+LSDUnrolling = lambda x: {1:8,2:8,3:8,4:8,5:6,6:5,7:4,9:3,10:3,11:3}.get(x) or (2 if 13<=x<=27 else 1)
+BranchCanBeLastInstrInCachedBlock = False
+Both32ByteBlocksMustBeCacheable = True # a 32 byte block can only be in the DSB if the other 32 byte block in the same 64 byte block is also cacheable
 
 class UopProperties:
    def __init__(self, instr, possiblePorts, inputOperands, outputOperands, divCycles=0, isLoadUop=False, isStoreAddressUop=False, isStoreDataUop=False,
@@ -53,15 +56,14 @@ class UopProperties:
 class Uop:
    idx_iter = count()
 
-   def __init__(self, prop, rnd):
+   def __init__(self, prop, instrI):
       self.idx = next(self.idx_iter)
       self.prop = prop # instance of UopProperties
-      self.rnd = rnd # iteration round
+      self.instrI = instrI # InstructionInstance
       self.actualPort = None
       self.eliminated = False
       self.renamedInputOperands = [] # [op[1] for op in inputOperands] # [(instrInputOperand, renamedInpOperand), ...]
       self.renamedOutputOperands = [] # [op[1] for op in outputOperands]
-      self.predecoded = None
       self.addedToIDQ = None
       self.issued = None
       self.readyForDispatch = None
@@ -75,7 +77,7 @@ class Uop:
       return [self]
 
    def __str__(self):
-      return 'Uop(idx: {}, rnd: {}, p: {})'.format(self.idx, self.rnd, self.actualPort)
+      return 'Uop(idx: {}, rnd: {}, p: {})'.format(self.idx, self.instrI.rnd, self.actualPort)
 
 
 class FusedUop:
@@ -89,6 +91,7 @@ class FusedUop:
 class LaminatedUop:
    def __init__(self, fusedUops):
       self.fusedUops = fusedUops
+      self.uopSource = None
 
    def getFusedUops(self):
       return self.fusedUops
@@ -97,16 +100,16 @@ class LaminatedUop:
       return [uop for fusedUop in self.getFusedUops() for uop in fusedUop.getUnfusedUops()]
 
 
-class StackSynchUop(Uop):
-   def __init__(self, instr, rnd):
+class StackSyncUop(Uop):
+   def __init__(self, instrI):
       possiblePorts = (['0','1','5'] if arch in ['CON', 'WOL', 'NHM', 'WSM', 'SNB', 'IVB'] else ['0','1','5','6'])
-      prop = UopProperties(instr, possiblePorts, [RegOperand('RSP')], [RegOperand('RSP')], isFirstUopOfInstr=True)
-      Uop.__init__(self, prop, rnd)
+      prop = UopProperties(instrI.instr, possiblePorts, [RegOperand('RSP')], [RegOperand('RSP')], isFirstUopOfInstr=True)
+      Uop.__init__(self, prop, instrI)
 
 
 class Instr:
    def __init__(self, asm, opcode, posNominalOpcode, instrStr, portData, uops, retireSlots, uopsMITE, uopsMS, divCycles, inputRegOperands, inputMemOperands,
-                outputRegOperands, outputMemOperands, memAddrOperands, agenOperands, latencies, TP, lcpStall, modifiesStack, mayBeEliminated, complexDecoder,
+                outputRegOperands, outputMemOperands, memAddrOperands, agenOperands, latencies, TP, lcpStall, implicitRSPChange, mayBeEliminated, complexDecoder,
                 nAvailableSimpleDecoders, hasLockPrefix, isBranchInstr, isSerializingInstr, isLoadSerializing, isStoreSerializing, macroFusibleWith,
                 macroFusedWithPrevInstr=False, macroFusedWithNextInstr=False):
       self.asm = asm
@@ -128,7 +131,7 @@ class Instr:
       self.latencies = latencies # latencies[(inOp,outOp)] = l
       self.TP = TP
       self.lcpStall = lcpStall
-      self.modifiesStack = modifiesStack # pops or pushes to the stack
+      self.implicitRSPChange = implicitRSPChange
       self.mayBeEliminated = mayBeEliminated # a move instruction that may be eliminated
       self.complexDecoder = complexDecoder # requires the complex decoder
       # no. of instr. that can be decoded with simple decoders in the same cycle; only applicable for instr. with complexDecoder == True
@@ -142,56 +145,33 @@ class Instr:
       self.macroFusedWithPrevInstr = macroFusedWithPrevInstr
       self.macroFusedWithNextInstr = macroFusedWithNextInstr
       self.UopPropertiesList = [] # list with UopProperties for each (unfused domain) uop
-      self.requiresStackSynchUop = False
       self.regMergeUopPropertiesList = []
 
    def __repr__(self):
        return "Instr: " + str(self.__dict__)
 
-   def generateUops(self, rnd):
-      if not self.UopPropertiesList:
-         return []
-
-      fusedDomainUops = deque()
-      for i in range(0, self.retireSlots-1):
-         fusedDomainUops.append(FusedUop([Uop(self.UopPropertiesList[i], rnd)]))
-      fusedDomainUops.append(FusedUop([Uop(prop, rnd) for prop in self.UopPropertiesList[self.retireSlots-1:]]))
-      if self.requiresStackSynchUop:
-         fusedDomainUops.append(StackSynchUop(self, rnd))
-
-      laminatedDomainUops = []
-      for _ in range(0, min(self.uopsMITE + self.uopsMS, len(fusedDomainUops)) - 1):
-         laminatedDomainUops.append(LaminatedUop([fusedDomainUops.popleft()]))
-      laminatedDomainUops.append(LaminatedUop(fusedDomainUops))
-
-      return laminatedDomainUops
+   def canBeUsedByLSD(self):
+      return not (self.uopsMS or self.implicitRSPChange or any((op.reg in High8Regs) for op in self.inputRegOperands+self.outputRegOperands))
 
 
 class UnknownInstr(Instr):
    def __init__(self, asm, opcode, posNominalOpcode):
       Instr.__init__(self, asm, opcode, posNominalOpcode, instrStr='', portData={}, uops=0, retireSlots=1, uopsMITE=1, uopsMS=0, divCycles=0,
                      inputRegOperands=[], inputMemOperands=[], outputRegOperands=[], outputMemOperands=[], memAddrOperands=[], agenOperands=[], latencies={},
-                     TP=None, lcpStall=False, modifiesStack=False, mayBeEliminated=False, complexDecoder=False, nAvailableSimpleDecoders=None,
+                     TP=None, lcpStall=False, implicitRSPChange=0, mayBeEliminated=False, complexDecoder=False, nAvailableSimpleDecoders=None,
                      hasLockPrefix=False, isBranchInstr=False, isSerializingInstr=False, isLoadSerializing=False, isStoreSerializing=False,
                      macroFusibleWith=set())
 
 
 class RegOperand:
-   def __init__(self, reg):
+   def __init__(self, reg, isImplicitStackOperand=False):
       self.reg = reg
+      self.isImplicitStackOperand = isImplicitStackOperand
 
 class MemOperand:
    def __init__(self, memAddr):
       self.memAddr = memAddr
 
-'''
-class InstrInstance:
-   def __init__(self, instr):
-      self.instr = instr
-      self.uops = []
-      self.renamedInputOperands = []
-      self.renamedOutputOperands = []
-'''
 
 class RenamedOperand:
    def __init__(self, nonRenamedOperand=None, complete=True):
@@ -225,7 +205,7 @@ class RenamedOperand:
       for uop in self.uops:
          for inpOp, renInpOp in zip(uop.prop.inputOperands, uop.renamedInputOperands):
             #if uop.prop.possiblePorts == ['2', '3']:
-            #   print str(uop.rnd) + ' ' + str(inpOp) + ' ' + str(renInpOp) + ' ' + str(renInpOp.getReadyCycle())
+            #   print str(uop.instrI.rnd) + ' ' + str(inpOp) + ' ' + str(renInpOp) + ' ' + str(renInpOp.getReadyCycle())
             if renInpOp.getReadyCycle() is None:
                return None
             lat = uop.prop.instr.latencies.get((inpOp, self.nonRenamedOperand), 1)
@@ -277,7 +257,9 @@ class Renamer:
                break
             if self.lastRegMergeIssued != firstUnfusedUop:
                for mergeProp in regMergeProps:
-                  renamerUops.append(Uop(mergeProp, firstUnfusedUop.rnd))
+                  mergeUop = FusedUop([Uop(mergeProp, firstUnfusedUop.instrI)])
+                  renamerUops.append(mergeUop)
+                  firstUnfusedUop.instrI.regMergeUops.append(LaminatedUop([mergeUop]))
                self.lastRegMergeIssued = firstUnfusedUop
                break
 
@@ -294,7 +276,7 @@ class Renamer:
 
       for fusedUop in renamerUops:
          for uop in fusedUop.getUnfusedUops():
-            if uop.prop.instr.mayBeEliminated and (not uop.prop.isRegMergeUop) and (not isinstance(uop, StackSynchUop)):
+            if uop.prop.instr.mayBeEliminated and (not uop.prop.isRegMergeUop) and (not isinstance(uop, StackSyncUop)):
                canonicalInpReg = getCanonicalReg(uop.prop.instr.inputRegOperands[0].reg)
                canonicalOutReg = getCanonicalReg(uop.prop.instr.outputRegOperands[0].reg)
 
@@ -321,7 +303,7 @@ class Renamer:
                   curMultiUseDict[renamedReg].update([canonicalInpReg, canonicalOutReg])
 
             if not uop.eliminated:
-               if uop.prop.instr.uops or isinstance(uop, StackSynchUop):
+               if uop.prop.instr.uops or isinstance(uop, StackSyncUop):
                   for inpOp in uop.prop.inputOperands:
                      key = self.getRenameDictKey(inpOp)
                      renamedOp = self.renameDict.setdefault(key, RenamedOperand(inpOp))
@@ -342,7 +324,7 @@ class Renamer:
                   for op in uop.prop.instr.outputRegOperands:
                      self.curInstrRndRenameDict[getCanonicalReg(op.reg)] = RenamedOperand()
 
-            if uop.prop.isLastUopOfInstr or uop.prop.isRegMergeUop:
+            if uop.prop.isLastUopOfInstr or uop.prop.isRegMergeUop or isinstance(uop, StackSyncUop):
                for renOp, uopsForOp in self.curInstrRndUopsForRenamedOpDict.items():
                   renOp.setUops(uopsForOp)
 
@@ -427,8 +409,14 @@ class FrontEnd:
       self.preDecoder = PreDecoder(instructionQueue)
       self.decoder = Decoder(instructionQueue, self.MS)
 
+      self.RSPOffset = 0
+
+      self.allGeneratedInstrInstances = []
+
       self.DSB = DSB(self.MS)
       self.addressesInDSB = set()
+
+      self.LSDUnrollCount = 1
 
       self.uopSource = 'MITE'
       if unroll:
@@ -436,13 +424,24 @@ class FrontEnd:
       else:
          self.cacheBlocksForNextRoundGenerator = CacheBlocksForNextRoundGenerator(instructions)
          cacheBlocksForFirstRound = next(self.cacheBlocksForNextRoundGenerator)
-         self.findCacheableAddresses(cacheBlocksForFirstRound)
-         for cacheBlock in cacheBlocksForFirstRound:
-            self.addNewCacheBlock(cacheBlock)
-         if 0 in self.addressesInDSB:
-            self.uopSource = 'DSB'
 
-      self.allGeneratedInstrInstances = []
+         allBlocksCanBeCached = all(self.canBeCached(block) for cb in cacheBlocksForFirstRound for block in split64ByteBlockTo32ByteBlocks(cb) if block)
+         allInstrsCanBeUsedByLSD = all(instrI.instr.canBeUsedByLSD() for cb in cacheBlocksForFirstRound for instrI in cb)
+         nUops = sum(len(instrI.uops) for cb in cacheBlocksForFirstRound for instrI in cb)
+         #print  [self.canBeCached(block) for cb in cacheBlocksForFirstRound for block in split64ByteBlockTo32ByteBlocks(cb) if block]
+         if allBlocksCanBeCached and allInstrsCanBeUsedByLSD and (nUops <= IDQ_Width):
+            self.uopSource = 'LSD'
+            self.LSDUnrollCount = LSDUnrolling(nUops)
+            #print nUops
+            #print self.LSDUnrollCount
+            for cacheBlock in cacheBlocksForFirstRound + [cb for _ in xrange(0, self.LSDUnrollCount-1) for cb in next(self.cacheBlocksForNextRoundGenerator)]:
+               self.addNewCacheBlock(cacheBlock)
+         else:
+            self.findCacheableAddresses(cacheBlocksForFirstRound)
+            for cacheBlock in cacheBlocksForFirstRound:
+               self.addNewCacheBlock(cacheBlock)
+            if 0 in self.addressesInDSB:
+               self.uopSource = 'DSB'
 
    def cycle(self):
       issueUops = []
@@ -459,85 +458,124 @@ class FrontEnd:
       if len(self.IDQ) + DSB_Width > IDQ_Width:
          return
 
-      # add new cache blocks
-      while len(self.DSB.B32BlockQueue) < 2 and len(self.preDecoder.B16BlockQueue) < 4:
-         if self.unroll:
-            self.addNewCacheBlock(next(self.cacheBlockGenerator))
-         else:
-            for cacheBlock in next(self.cacheBlocksForNextRoundGenerator):
-               self.addNewCacheBlock(cacheBlock)
-
-      # add new uops to IDQ
-      newUops = []
-      if self.MS.isBusy():
-         newUops = self.MS.cycle()
-      elif self.uopSource == 'MITE':
-         self.preDecoder.cycle()
-         newInstrIUops = self.decoder.cycle()
-         newUops = [u for _, u in newInstrIUops if u is not None]
-         if not self.unroll and newInstrIUops:
-            curInstrI = newInstrIUops[-1][0]
-            if curInstrI.instr.isBranchInstr or curInstrI.instr.macroFusedWithNextInstr:
-               if 0 in self.addressesInDSB:
-                  self.uopSource = 'DSB'
-      elif self.uopSource == 'DSB':
-         newInstrIUops = self.DSB.cycle()
-         newUops = [u for _, u in newInstrIUops if u is not None]
-         if newInstrIUops and not self.DSB.isBusy():
-            curInstrI = newInstrIUops[-1][0]
-            if curInstrI.instr.isBranchInstr or curInstrI.instr.macroFusedWithNextInstr:
-               nextAddr = 0
+      if self.uopSource == 'LSD':
+         if not self.IDQ:
+            for _ in xrange(0, self.LSDUnrollCount):
+               for cacheBlock in next(self.cacheBlocksForNextRoundGenerator):
+                  self.addNewCacheBlock(cacheBlock)
+      else:
+         # add new cache blocks
+         while len(self.DSB.B32BlockQueue) < 2 and len(self.preDecoder.B16BlockQueue) < 4:
+            if self.unroll:
+               self.addNewCacheBlock(next(self.cacheBlockGenerator))
             else:
-               nextAddr = curInstrI.address + len(curInstrI.instr.opcode)/2
-            if nextAddr not in self.addressesInDSB:
-               self.uopSource = 'MITE'
+               for cacheBlock in next(self.cacheBlocksForNextRoundGenerator):
+                  self.addNewCacheBlock(cacheBlock)
 
-      for lamUop in newUops:
-         self.IDQ.append(lamUop)
-         for uop in lamUop.getUnfusedUops():
-            uop.addedToIDQ = clock
+         # add new uops to IDQ
+         newUops = []
+         if self.MS.isBusy():
+            newUops = self.MS.cycle()
+         elif self.uopSource == 'MITE':
+            self.preDecoder.cycle()
+            newInstrIUops = self.decoder.cycle()
+            newUops = [u for _, u in newInstrIUops if u is not None]
+            if not self.unroll and newInstrIUops:
+               curInstrI = newInstrIUops[-1][0]
+               if curInstrI.instr.isBranchInstr or curInstrI.instr.macroFusedWithNextInstr:
+                  if 0 in self.addressesInDSB:
+                     self.uopSource = 'DSB'
+         elif self.uopSource == 'DSB':
+            newInstrIUops = self.DSB.cycle()
+            newUops = [u for _, u in newInstrIUops if u is not None]
+            if newInstrIUops and not self.DSB.isBusy():
+               curInstrI = newInstrIUops[-1][0]
+               if curInstrI.instr.isBranchInstr or curInstrI.instr.macroFusedWithNextInstr:
+                  nextAddr = 0
+               else:
+                  nextAddr = curInstrI.address + len(curInstrI.instr.opcode)/2
+               if nextAddr not in self.addressesInDSB:
+                  self.uopSource = 'MITE'
+
+         for lamUop in newUops:
+            self.addStackSyncUop(lamUop.getUnfusedUops()[0])
+            self.IDQ.append(lamUop)
+            for uop in lamUop.getUnfusedUops():
+               uop.addedToIDQ = clock
 
 
    def findCacheableAddresses(self, cacheBlocksForOneRound):
       for cacheBlock in cacheBlocksForOneRound:
          B32Blocks = [block for block in split64ByteBlockTo32ByteBlocks(cacheBlock) if block]
-         if all(self.canBeCached(block) for block in B32Blocks):
-            # on SKL, a 64-Byte block cannot be cached if the first or the second 32 Bytes cannot be cached
-            # ToDo: other microarchitectures
-            for B32Block in B32Blocks:
+         if Both32ByteBlocksMustBeCacheable and any((not self.canBeCached(block)) for block in B32Blocks):
+            return
+         for B32Block in B32Blocks:
+            if self.canBeCached(B32Block):
                self.addressesInDSB.add(B32Block[0].address)
+            else:
+               return
 
    def canBeCached(self, B32Block):
       if sum(len(instrI.uops) for instrI in B32Block if not instrI.instr.macroFusedWithPrevInstr) > 18:
          # a 32-Byte block cannot be cached if it contains more than 18 uops
          return False
-      lastInstrI = B32Block[-1]
-      if lastInstrI.instr.macroFusedWithNextInstr:
-         return False
-      if lastInstrI.instr.isBranchInstr and (lastInstrI.address % 32) + len(lastInstrI.instr.opcode)/2 >= 32:
+      if not BranchCanBeLastInstrInCachedBlock:
          # on SKL, if the next instr. after a branch starts in a new block, the current block cannot be cached
          # ToDo: other microarchitectures
-         return False
+         lastInstrI = B32Block[-1]
+         if lastInstrI.instr.macroFusedWithNextInstr or (lastInstrI.instr.isBranchInstr and (lastInstrI.address % 32) + len(lastInstrI.instr.opcode)/2 >= 32):
+            return False
       return True
 
    def addNewCacheBlock(self, cacheBlock):
       self.allGeneratedInstrInstances.extend(cacheBlock)
-      B32Blocks = split64ByteBlockTo32ByteBlocks(cacheBlock)
-      for B32Block in B32Blocks:
-         if not B32Block: continue
-         if B32Block[0].address in self.addressesInDSB:
-            d = deque(instrI for instrI in B32Block if not instrI.instr.macroFusedWithPrevInstr)
-            if d:
-               self.DSB.B32BlockQueue.append(d)
-         else:
-            for B16Block in split32ByteBlockTo16ByteBlocks(B32Block):
-               if not B16Block: continue
-               self.preDecoder.B16BlockQueue.append(deque(B16Block))
-               lastInstrI = B16Block[-1]
-               if lastInstrI.instr.isBranchInstr and (lastInstrI.address % 16) + len(lastInstrI.instr.opcode)/2 > 16:
-                  # branch instr. ends in next block
-                  self.preDecoder.B16BlockQueue.append(deque())
+      if self.uopSource == 'LSD':
+         for instrI in cacheBlock:
+            self.IDQ.extend(instrI.uops)
+            for uop in instrI.uops:
+               uop.uopSource = 'LSD'
+      else:
+         B32Blocks = split64ByteBlockTo32ByteBlocks(cacheBlock)
+         for B32Block in B32Blocks:
+            if not B32Block: continue
+            if B32Block[0].address in self.addressesInDSB:
+               d = deque(instrI for instrI in B32Block if not instrI.instr.macroFusedWithPrevInstr)
+               if d:
+                  self.DSB.B32BlockQueue.append(d)
+            else:
+               for B16Block in split32ByteBlockTo16ByteBlocks(B32Block):
+                  if not B16Block: continue
+                  self.preDecoder.B16BlockQueue.append(deque(B16Block))
+                  lastInstrI = B16Block[-1]
+                  if lastInstrI.instr.isBranchInstr and (lastInstrI.address % 16) + len(lastInstrI.instr.opcode)/2 > 16:
+                     # branch instr. ends in next block
+                     self.preDecoder.B16BlockQueue.append(deque())
 
+   def addStackSyncUop(self, uop):
+      if not uop.prop.isFirstUopOfInstr:
+         return
+
+      instr = uop.prop.instr
+      requiresSyncUop = False
+
+      if self.RSPOffset and any((getCanonicalReg(op.reg) == 'RSP') for op in instr.inputRegOperands+instr.memAddrOperands if not op.isImplicitStackOperand):
+         requiresSyncUop = True
+         self.RSPOffset = 0
+
+      self.RSPOffset += instr.implicitRSPChange
+      if self.RSPOffset > 192:
+         requiresSyncUop = True
+         self.RSPOffset = 0
+
+      if any((getCanonicalReg(op.reg) == 'RSP') for op in instr.outputRegOperands):
+         self.RSPOffset = 0
+
+      if requiresSyncUop:
+         stackSyncUop = StackSyncUop(uop.instrI)
+         stackSyncUop.addedToIDQ = clock
+         lamUop = LaminatedUop([FusedUop([stackSyncUop])])
+         self.IDQ.append(lamUop)
+         uop.instrI.stackSyncUops.append(lamUop)
 
 
 class DSB:
@@ -578,6 +616,7 @@ class DSB:
          lamUops = instrI.uops
          if instrI.instr.uopsMITE:
             for lamUop in lamUops[:instrI.instr.uopsMITE]:
+               lamUop.uopSource = 'DSB'
                lst.append((instrI, lamUop))
          else:
             lst.append((instrI, None))
@@ -608,6 +647,8 @@ class MicrocodeSequencer:
    def addUops(self, uops):
       self.uopQueue.extend(uops)
       self.stalled = 1
+      for lamUop in uops:
+         lamUop.uopSource = 'MS'
 
    def isBusy(self):
       return self.uopQueue or self.stalled
@@ -628,14 +669,14 @@ class Decoder:
          if instrI.instr.macroFusedWithPrevInstr:
             self.instructionQueue.popleft()
             continue
-         if instrI.uops[0].getUnfusedUops()[0].predecoded + predecodeDecodeDelay > clock:
+         if instrI.predecoded + predecodeDecodeDelay > clock:
             break
          if uopsList and instrI.instr.complexDecoder:
             break
          if instrI.instr.macroFusibleWith and (not macroFusibleInstrCanBeDecodedAsLastInstr):
             if nDecodedInstrs == nDecoders-1:
                break
-            if (len(self.instructionQueue) <= 1) or (self.instructionQueue[1].uops[0].getUnfusedUops()[0].predecoded + predecodeDecodeDelay > clock):
+            if (len(self.instructionQueue) <= 1) or (self.instructionQueue[1].predecoded + predecodeDecodeDelay > clock):
                break
          #if instrI.instr.macroFusibleWith and ():
          #   break
@@ -644,6 +685,7 @@ class Decoder:
          if instrI.instr.uopsMITE:
             for lamUop in instrI.uops[:instrI.instr.uopsMITE]:
                uopsList.append((instrI, lamUop))
+               lamUop.uopSource = 'MITE'
          else:
             uopsList.append((instrI, None))
 
@@ -705,9 +747,7 @@ class PreDecoder:
 
          if not self.stalled:
             for instrI in self.preDecQueue:
-               for lamUop in instrI.uops:
-                  for uop in lamUop.getUnfusedUops():
-                     uop.predecoded = clock
+               instrI.predecoded = clock
                self.instructionQueue.append(instrI)
             self.preDecQueue.clear()
 
@@ -1004,7 +1044,7 @@ def adjustLatenciesAndAddMergeUops(instructions):
                canonicalBaseReg = getCanonicalReg(memAddr.base)
                if (canonicalBaseReg in prevWriteToReg) and (prevWriteToReg[canonicalBaseReg].instrStr in ['MOV (R64, M64)', 'MOV (RAX, M64)',
                                                                                                           'MOV (R32, M32)', 'MOV (EAX, M32)',
-                                                                                                          'MOVSXD (R64, M32)']):
+                                                                                                          'MOVSXD (R64, M32)', 'POP (R64)']):
                   for memAddrOp in instr.memAddrOperands:
                      for outputOp in instr.outputRegOperands + instr.outputMemOperands:
                         instr.latencies[(memAddrOp, outputOp)] -= 1
@@ -1030,25 +1070,9 @@ def adjustLatenciesAndAddMergeUops(instructions):
 
 
 def computeUopProperties(instructions):
-   stackPtrImplicitlyModified = False
-   for instr in instructions:
-      allRegOperands = instr.inputRegOperands + instr.outputRegOperands + instr.memAddrOperands
-      if any((getCanonicalReg(op.reg) == 'RSP') for op in allRegOperands):
-         stackPtrImplicitlyModified = False
-      if instr.modifiesStack:
-         stackPtrImplicitlyModified = True
-
    for instr in instructions:
       if instr.macroFusedWithPrevInstr:
          continue
-
-      allRegOperands = instr.inputRegOperands + instr.outputRegOperands + instr.memAddrOperands
-
-      if stackPtrImplicitlyModified and any((getCanonicalReg(op.reg) == 'RSP') for op in allRegOperands):
-         instr.requiresStackSynchUop = True
-         stackPtrImplicitlyModified = False
-      if instr.modifiesStack:
-         stackPtrImplicitlyModified = True
 
       allInputOperands = instr.inputRegOperands + instr.memAddrOperands + instr.inputMemOperands
 
@@ -1140,7 +1164,11 @@ def getInstructions(filename, rawFile, iacaMarkers, instrDataDict):
       usesIndexedAddr = any((getMemAddr(memOp).index is not None) for memOp in instrD.memOperands.values())
       posNominalOpcode = int(instrD.attributes.get('POS_NOMINAL_OPCODE', 0))
       lcpStall = ('PREFIX66' in instrD.attributes) and (instrD.attributes.get('IMM_WIDTH', '') == '16')
-      modifiesStack = any(('STACK' in r) for r in instrD.regOperands.values())
+      implicitRSPChange = 0
+      if any(('STACKPOP' in r) for r in instrD.regOperands.values()):
+         implicitRSPChange = pow(2, int(instrD.attributes.get('EOSZ', 1)))
+      if any(('STACKPUSH' in r) for r in instrD.regOperands.values()):
+         implicitRSPChange = -pow(2, int(instrD.attributes.get('EOSZ', 1)))
       isBranchInstr = any(True for n, r in instrD.regOperands.items() if ('IP' in r) and ('W' in instrD.rw[n]))
       isSerializingInstr = (instrD.iform in ['LFENCE', 'CPUID', 'IRET', 'IRETD', 'RSM', 'INVD', 'INVEPT_GPR64_MEMdq', 'INVLPG_MEMb', 'INVVPID_GPR64_MEMdq',
                                              'LGDT_MEMs64', 'LIDT_MEMs64', 'LLDT_MEMw', 'LLDT_GPR16', 'LTR_MEMw', 'LTR_GPR16', 'MOV_CR_CR_GPR64',
@@ -1233,15 +1261,17 @@ def getInstructions(filename, rawFile, iacaMarkers, instrDataDict):
                   for outN, _ in instrOutputOperands:
                      latencies[(memOp, outputOperandsDict[outN])] = latData.get((inpN, outN, 'mem'), 1)
 
-            if not modifiesStack:
-               for inpN, inpM in set(instrInputMemOperands + instrOutputMemOperands):
-                  memAddr = getMemAddr(inpM)
-                  for reg, addrType in [(memAddr.base, 'addr'), (memAddr.index, 'addrI')]:
-                     if (reg is None) or ('IP' in reg): continue
-                     regOp = RegOperand(reg)
-                     memAddrOperands.append(regOp)
-                     for outN, _ in instrOutputOperands:
-                        latencies[(regOp, outputOperandsDict[outN])] = latData.get((inpN, outN, addrType), 1)
+            allMemOperands = set(instrInputMemOperands + instrOutputMemOperands)
+            for inpN, inpM in allMemOperands:
+               memAddr = getMemAddr(inpM)
+               for reg, addrType in [(memAddr.base, 'addr'), (memAddr.index, 'addrI')]:
+                  if (reg is None) or ('IP' in reg): continue
+                  regOp = RegOperand(reg)
+                  if (reg == 'RSP') and implicitRSPChange and (len(allMemOperands) == 1 or inpN == 'MEM1'):
+                     regOp.isImplicitStackOperand = True
+                  memAddrOperands.append(regOp)
+                  for outN, _ in instrOutputOperands:
+                     latencies[(regOp, outputOperandsDict[outN])] = latData.get((inpN, outN, addrType), 1)
 
             if (not complexDecoder) and (uopsMS or (uopsMITE + uopsMS > 1)):
                complexDecoder = True
@@ -1253,8 +1283,9 @@ def getInstructions(filename, rawFile, iacaMarkers, instrDataDict):
 
             instruction = Instr(instrD.asm, instrD.opcode, posNominalOpcode, instrData['string'], portData, uops, retireSlots, uopsMITE, uopsMS, divCycles,
                                 inputRegOperands, inputMemOperands, outputRegOperands, outputMemOperands, memAddrOperands, agenOperands, latencies, TP,
-                                lcpStall, modifiesStack, mayBeEliminated, complexDecoder, nAvailableSimpleDecoders, hasLockPrefix, isBranchInstr,
+                                lcpStall, implicitRSPChange, mayBeEliminated, complexDecoder, nAvailableSimpleDecoders, hasLockPrefix, isBranchInstr,
                                 isSerializingInstr, isLoadSerializing, isStoreSerializing, instrData.get('macroFusible', set()))
+
             #print instruction
             break
 
@@ -1268,10 +1299,11 @@ def getInstructions(filename, rawFile, iacaMarkers, instrDataDict):
             instruction.macroFusedWithPrevInstr = True
             prevInstr.macroFusedWithNextInstr = True
             instrPorts = instruction.portData.keys()[0]
-            if prevInstr.uops == 0:
+            if prevInstr.uops == 0: #ToDo: is this necessary?
                prevInstr.uops = instruction.uops
                prevInstr.portData = instruction.portData
             else:
+               prevInstr.portData = dict(prevInstr.portData) # create copy so that the port usage of other instructions of the same type is not modified
                for p, u in prevInstr.portData.items():
                   if set(instrPorts).issubset(set(p)):
                      del prevInstr.portData[p]
@@ -1282,7 +1314,32 @@ def getInstructions(filename, rawFile, iacaMarkers, instrDataDict):
    return instructions
 
 
-InstrInstance = namedtuple('InstrInstance', ['instr', 'address', 'round', 'uops'])
+class InstrInstance:
+   def __init__(self, instr, address, rnd):
+      self.instr = instr
+      self.address = address
+      self.rnd = rnd
+      self.uops = self.__generateUops()
+      self.regMergeUops = []
+      self.stackSyncUops = []
+      self.predecoded = None
+
+   def __generateUops(self):
+      if not self.instr.UopPropertiesList:
+         return []
+
+      fusedDomainUops = deque()
+      for i in range(0, self.instr.retireSlots-1):
+         fusedDomainUops.append(FusedUop([Uop(self.instr.UopPropertiesList[i], self)]))
+      fusedDomainUops.append(FusedUop([Uop(prop, self) for prop in self.instr.UopPropertiesList[self.instr.retireSlots-1:]]))
+
+      laminatedDomainUops = []
+      for _ in range(0, min(self.instr.uopsMITE + self.instr.uopsMS, len(fusedDomainUops)) - 1):
+         laminatedDomainUops.append(LaminatedUop([fusedDomainUops.popleft()]))
+      laminatedDomainUops.append(LaminatedUop(fusedDomainUops))
+
+      return laminatedDomainUops
+
 
 def split64ByteBlockTo16ByteBlocks(cacheBlock):
    return [[ii for ii in cacheBlock if b*16 <= ii.address % 64 < (b+1)*16 ] for b in range(0,4)]
@@ -1303,7 +1360,7 @@ def CacheBlockGenerator(instructions, unroll):
    nextAddr = 0
    for rnd in count():
       for instr in instructions:
-         cacheBlock.append(InstrInstance(instr, nextAddr, rnd, instr.generateUops(rnd)))
+         cacheBlock.append(InstrInstance(instr, nextAddr, rnd))
 
          if (not unroll) and instr == instructions[-1]:
             yield cacheBlock
@@ -1323,12 +1380,37 @@ def CacheBlocksForNextRoundGenerator(instructions):
    cacheBlocks = []
    prevRnd = 0
    for cacheBlock in CacheBlockGenerator(instructions, unroll=False):
-      curRnd = cacheBlock[-1].round
+      curRnd = cacheBlock[-1].rnd
       if prevRnd != curRnd:
          yield cacheBlocks
          cacheBlocks = []
          prevRnd = curRnd
       cacheBlocks.append(cacheBlock)
+
+TableLineData = namedtuple('TableLineData', ['string', 'url', 'uopsForRnd'])
+
+def getUopsTableColumns(tableLineData):
+   columnKeys = ['MITE', 'MS', 'DSB', 'LSD', 'Issued', 'Exec.']
+   columnKeys.extend(('Port ' + p) for p in allPorts)
+   columns = OrderedDict([(k, []) for k in columnKeys])
+
+   for tld in tableLineData:
+      for c in columns.values():
+         c.append(0.0)
+      for lamUops in tld.uopsForRnd: # ToDo: Stacksync & RegMergeUops
+         for lamUop in lamUops:
+            if lamUop.uopSource is not None:
+               columns[lamUop.uopSource][-1] += 1
+            for fusedUop in lamUop.getFusedUops():
+               columns['Issued'][-1] += 1
+               for uop in fusedUop.getUnfusedUops():
+                  if uop.actualPort is not None:
+                     columns['Exec.'][-1] += 1
+                     columns['Port ' + uop.actualPort][-1] += 1
+      for c in columns.values():
+         c[-1] = c[-1] / len(tld.uopsForRnd)
+
+   return columns
 
 
 def printPortUsage(instructions, uopsForRound):
@@ -1360,6 +1442,46 @@ def printPortUsage(instructions, uopsForRound):
       print formatStr.format(uopsCol, *portUsageL) + ' ' + instr.asm
 
 
+def getTableLine(columnWidthList, columns):
+   line = '|'
+   for w, col in zip(columnWidthList, columns):
+      formatStr = '{:^' + str(w) + '}|'
+      line += formatStr.format(col)
+   return line
+
+def formatTableValue(val):
+   val = '{:.2f}'.format(val).rstrip('0').rstrip('.')
+   return val if (val != '0') else ''
+
+
+def printUopsTable(tableLineData, addHyperlink=True):
+   columns = getUopsTableColumns(tableLineData)
+
+   columnWidthList = [2 + max(len(k), max(len(formatTableValue(l)) for l in lines)) for k, lines in columns.items()]
+   tableWidth = sum(columnWidthList) + len(columns.keys()) + 1
+
+   #print '-' * tableWidth
+   print getTableLine(columnWidthList, columns.keys())
+   print '-' * tableWidth
+
+   for i, tld in enumerate(tableLineData):
+      line = getTableLine(columnWidthList, [formatTableValue(v[i]) for v in columns.values()]) + ' '
+      if addHyperlink and (tld.url is not None):
+         # see https://stackoverflow.com/a/46289463/10461973
+         line += '\x1b]8;;{}\a{}\x1b]8;;\a'.format(tld.url, tld.string)
+      else:
+         line += tld.string
+      print line
+
+   print '-' * tableWidth
+   sumLine = getTableLine(columnWidthList, [formatTableValue(sum(v)) for v in columns.values()])
+   sumLine += ' Total'
+   print sumLine
+
+
+   #print '-' * tableWidth
+
+
 def writeHtmlFile(filename, title, head, body):
    with open(filename, "w") as f:
       f.write('<html>\n'
@@ -1373,7 +1495,7 @@ def writeHtmlFile(filename, title, head, body):
               '</html>\n')
 
 
-def generateHTMLTraceTable(filename, instructions, uopsForRound, maxCycle):
+def generateHTMLTraceTable(filename, instructions, instrInstances, lastRelevantRound, maxCycle):
    style = []
    style.append('<style>')
    style.append('table {border-collapse: collapse}')
@@ -1395,35 +1517,57 @@ def generateHTMLTraceTable(filename, instructions, uopsForRound, maxCycle):
    table.append('<th style="text-align:center">Actual Port</th>')
    table.append('</tr>')
 
-   nRows = sum(max(len(uops),1) for uops in uopsForRound[0].values())
-   for rnd, uopsDict in enumerate(uopsForRound):
-      table.append('<tr style="border-top: 2px solid black">')
-      table.append('<td rowspan="{}">{}</td>'.format(nRows, rnd))
-      for instrI, instr in enumerate(instructions):
-         if instrI > 0:
-            table.append('<tr>')
-         table.append('<td rowspan=\"{}\" style="text-align:left"><code>{}</code></td>'.format(len(uopsDict[instr]), instr.asm))
-         for uopI, uop in enumerate(uopsDict[instr]):
+   prevRnd = -1
+   for instrI in instrInstances:
+      if prevRnd != instrI.rnd:
+         prevRnd = instrI.rnd
+         table.append('<tr style="border-top: 2px solid black">')
+         if instrI.rnd > lastRelevantRound:
+            break
+         nRowsForRnd = sum(max(len([uop for lamUop in instrI2.regMergeUops+instrI2.stackSyncUops+instrI2.uops for uop in lamUop.getUnfusedUops()]),1)
+                                                                                                   for instrI2 in instrInstances if instrI2.rnd == instrI.rnd)
+         table.append('<td rowspan="{}">{}</td>'.format(nRowsForRnd, instrI.rnd))
+      else:
+         table.append('<tr>')
+
+      subInstrs = []
+      if instrI.regMergeUops:
+         subInstrs += [('&lt;Register Merge Uop&gt;', True, [uop for lamUop in instrI.regMergeUops for uop in lamUop.getUnfusedUops()])]
+      if instrI.stackSyncUops:
+         subInstrs += [('&lt;Stack Sync Uop&gt;', True, [uop for lamUop in instrI.stackSyncUops for uop in lamUop.getUnfusedUops()])]
+      if instrI.rnd == 0 and (not isinstance(instrI.instr, UnknownInstr)):
+         string = '<a href="{}">{}</a>'.format(getURL(instrI.instr.instrStr), instrI.instr.asm)
+      else:
+         string = instrI.instr.asm
+      subInstrs += [(string, False, [uop for lamUop in instrI.uops for uop in lamUop.getUnfusedUops()])]
+
+      for string, isPseudoInstr, uops in subInstrs:
+         table.append('<td rowspan=\"{}\" style="text-align:left"><code>{}</code></td>'.format(len(uops), string))
+         for uopI, uop in enumerate(uops):
             if uopI > 0:
                table.append('<tr>')
             table.append('<td>{{{}}}</td>'.format(','.join(uop.prop.possiblePorts) if uop.prop.possiblePorts else '-'))
             table.append('<td>{}</td>'.format(uop.actualPort if uop.actualPort else '-'))
 
             uopEvents = ['' for _ in xrange(0,maxCycle+1)]
-            for evCycle, ev in [(uop.predecoded, 'P'), (uop.addedToIDQ, 'Q'), (uop.issued, 'I'), (uop.readyForDispatch, 'r'), (uop.dispatched, 'D'), (uop.executed, 'E'), (uop.retired, 'R'),
+            for evCycle, ev in [(uop.addedToIDQ, 'Q'), (uop.issued, 'I'), (uop.readyForDispatch, 'r'), (uop.dispatched, 'D'), (uop.executed, 'E'), (uop.retired, 'R'),
                                 (max(op.getReadyCycle() for op in uop.renamedInputOperands) if uop.renamedInputOperands else 0, 'i'),
                                 (max(op.getReadyCycle() for op in uop.renamedOutputOperands) if uop.renamedOutputOperands else 0, 'o') ]:
                if evCycle is not None and evCycle <= maxCycle:
                   uopEvents[evCycle] += ev
 
-            for ev in uopEvents:
-               table.append('<td>{}</td>'.format(ev))
+            for cycle, ev in enumerate(uopEvents):
+               if (uopI == 0) and (instrI.predecoded == cycle) and (not isPseudoInstr):
+                  table.append('<td rowspan=\"{}\">P</td>'.format(len(uops)))
+               else:
+                  table.append('<td>{}</td>'.format(ev))
 
             table.append('</tr>')
 
-         if not uopsDict[instr]:
+         if not uops:
             table.append('<td>-</td><td>-</td>')
-            table.append('<td></td>'*(maxCycle+1))
+            for cycle in xrange(0,maxCycle+1):
+               table.append('<td>P</td>' if instrI.predecoded == cycle else '<td></td>')
             table.append('</tr>')
 
    table.append('</table>')
@@ -1445,7 +1589,13 @@ def generateHTMLGraph(filename, instructions, instrInstances, maxCycle):
       if (cycle is not None) and (cycle <= maxCycle):
          eventsDict[evtName][cycle] += 1
 
-   for evtName, evtAttrName in [('uops predecoded', 'predecoded'), ('uops added to IDQ', 'addedToIDQ')]:
+   for evtName, evtAttrName in [('instr. predecoded', 'predecoded')]:
+      eventsDict[evtName] = [0 for _ in xrange(0,maxCycle+1)]
+      for instrI in instrInstances:
+         cycle = getattr(instrI, evtAttrName)
+         addEvent(evtName, cycle)
+
+   for evtName, evtAttrName in [('uops added to IDQ', 'addedToIDQ')]:
       eventsDict[evtName] = [0 for _ in xrange(0,maxCycle+1)]
       for instrI in instrInstances:
          for lamUop in instrI.uops:
@@ -1495,6 +1645,13 @@ def generateHTMLGraph(filename, instructions, instrInstances, maxCycle):
    writeHtmlFile(filename, 'Graph', head, body)
 
 
+def canonicalizeInstrString(instrString):
+   return re.sub('[(){}, ]+', '_', instrString).strip('_')
+
+def getURL(instrStr):
+   return 'https://www.uops.info/html-instr/' + canonicalizeInstrString(instrStr) + '.html'
+
+
 # Disassembles a binary and finds for each instruction the corresponding entry in the XML file.
 # With the -iacaMarkers option, only the parts of the code that are between the IACA markers are considered.
 def main():
@@ -1525,6 +1682,12 @@ def main():
       pop5CRequiresComplexDecoder = True
       global RS_Width
       RS_Width = 60
+      global IDQ_Width
+      IDQ_Width = 56
+      global BranchCanBeLastInstrInCachedBlock
+      BranchCanBeLastInstrInCachedBlock = True
+      global Both32ByteBlocksMustBeCacheable
+      Both32ByteBlocksMustBeCacheable = False
 
    instrDataDict = importlib.import_module('instrData.'+arch).instrData
 
@@ -1551,7 +1714,6 @@ def main():
    nRounds = 100 + 400/len(instructions)
    uopsForRound = []
 
-
    done = False
    while True:
       frontEnd.cycle()
@@ -1560,7 +1722,7 @@ def main():
 
          for uop in fusedUop.getUnfusedUops():
             instr = uop.prop.instr
-            rnd = uop.rnd
+            rnd = uop.instrI.rnd
             if rnd >= nRounds and clock > 500:
                done = True
                break
@@ -1590,10 +1752,35 @@ def main():
    print 'TP: {:.2f}'.format(TP)
    print ''
 
-   printPortUsage(instructions, uopsForRelRound)
+   #printPortUsage(instructions, uopsForRelRound)
+
+   instrInstancesForInstr = {instr: [] for instr in instructions}
+   for instrI in frontEnd.allGeneratedInstrInstances:
+      if firstRelevantRound <= instrI.rnd <= lastRelevantRound:
+         instrInstancesForInstr[instrI.instr].append(instrI)
+
+   tableLineData = []
+   for instr in instructions:
+      instrInstances = instrInstancesForInstr[instr]
+      if any(instrI.regMergeUops for instrI in instrInstances):
+         uops = [instrI.regMergeUops for instrI in instrInstances]
+         tableLineData.append(TableLineData('<Register Merge Uop>', None, uops))
+      if any(instrI.stackSyncUops for instrI in instrInstances):
+         uops = [instrI.stackSyncUops for instrI in instrInstances]
+         tableLineData.append(TableLineData('<Stack Sync Uop>', None, uops))
+
+      uops = [instrI.uops for instrI in instrInstances]
+      url = None
+      if not isinstance(instrI.instr, UnknownInstr):
+         url = getURL(instr.instrStr)
+      tableLineData.append(TableLineData(instr.asm, url, uops))
+
+   printUopsTable(tableLineData)
+   print ''
 
    if args.trace is not None:
-      generateHTMLTraceTable(args.trace, instructions, uopsForRound, clock-1)
+      #ToDo: use TableLineData instead
+      generateHTMLTraceTable(args.trace, instructions, frontEnd.allGeneratedInstrInstances, lastRelevantRound, clock-1)
 
    if args.graph is not None:
       generateHTMLGraph(args.graph, instructions, frontEnd.allGeneratedInstrInstances, clock-1)
