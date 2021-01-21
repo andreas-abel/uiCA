@@ -19,8 +19,21 @@ def main():
    for XMLInstr in root.iter('instruction'):
       iform = XMLInstr.attrib['iform']
       instrString = XMLInstr.attrib['string']
+      category = XMLInstr.attrib['category']
       attr = {a.upper(): XMLInstr.attrib[a] for a in allXmlAttributes if a in XMLInstr.attrib}
       opIdxToName = {o.attrib['idx']:o.attrib['name'] for o in XMLInstr.iter('operand') if 'name' in o.attrib}
+
+      flagNode = XMLInstr.find('./operand[@type="flags"]')
+      readFlags = set()
+      writtenFlags = set()
+      if flagNode is not None:
+         for flag in ['A', 'C', 'O', 'P', 'S', 'Z']:
+            rw = flagNode.attrib.get('flag_' + flag + 'F', '')
+            hasImmNode = (XMLInstr.find('./operand[@type="imm"]') is not None)
+            if ('r' in rw) or (('cw' in rw) and not (hasImmNode and category in ['SHIFT', 'ROTATE'])):
+               readFlags.add(flag)
+            if 'w' in rw:
+               writtenFlags.add(flag)
 
       for archNode in XMLInstr.iter('architecture'):
          measurementNode = archNode.find('./measurement')
@@ -34,6 +47,11 @@ def main():
             instrData['string'] = instrString
             if XMLInstr.attrib.get('locked', '') == '1':
                instrData['locked'] = 1
+
+            if readFlags:
+               instrData['flagsR'] = readFlags
+            if writtenFlags:
+               instrData['flagsW'] = writtenFlags
 
             for mSuffix, iSuffix in [('', ''), ('_same_reg', '_SR'), ('_indexed', '_I')]:
                for mKey, iKey in [('uops', 'uops'), ('uops_retire_slots', 'retSlots'), ('uops_MITE', 'uopsMITE'), ('uops_MS', 'uopsMS'),
