@@ -8,12 +8,13 @@ import sys
 from collections import Counter, defaultdict, deque, namedtuple, OrderedDict
 from heapq import heappop, heappush
 from itertools import chain, count
-from x64_lib import *
 
-sys.path.append(os.path.join(os.path.dirname(__file__), '../XED-to-XML'))
+from x64_lib import *
+from microArchConfigs import MicroArchConfigs
+
+sys.path.append(os.path.join(os.path.dirname(os.path.realpath(__file__)), 'XED-to-XML'))
 from disas import *
 
-from microArchConfigs import MicroArchConfigs
 
 clock = 0
 uArchConfig = None
