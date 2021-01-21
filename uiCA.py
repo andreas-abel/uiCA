@@ -1145,7 +1145,7 @@ def computeUopProperties(instructions):
 
 
 def getInstructions(filename, rawFile, iacaMarkers, instrDataDict):
-   xedBinary = os.path.join(os.path.dirname(__file__), '..', 'XED-to-XML', 'obj', 'wkit', 'bin', 'xed')
+   xedBinary = os.path.join(os.path.dirname(os.path.realpath(__file__)), 'XED-to-XML', 'obj', 'wkit', 'bin', 'xed')
    output = subprocess.check_output([xedBinary, '-64', '-v', '4', '-isa-set',  ('-ir' if rawFile else '-i'), filename])
    disas = parseXedOutput(output, iacaMarkers)
 
