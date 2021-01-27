@@ -1046,7 +1046,8 @@ def adjustLatenciesAndAddMergeUops(instructions):
       if instr.hasLockPrefix:
          for inOp in instr.inputRegOperands:
             # the latency upper bound in the xml file is usually too pessimistic in these cases
-            instr.latencies[(inOp, instr.outputMemOperands[0])] = instr.latencies[(inOp, instr.outputRegOperands[0])]
+            if instr.outputRegOperands:
+               instr.latencies[(inOp, instr.outputMemOperands[0])] = instr.latencies[(inOp, instr.outputRegOperands[0])]
 
       if any(high8RegClean[getCanonicalReg(inOp.reg)] for inOp in instr.inputRegOperands if inOp.reg in High8Regs):
          for key in list(instr.latencies.keys()):

@@ -6,7 +6,7 @@ import sys
 import xml.etree.ElementTree as ET
 from collections import defaultdict
 
-sys.path.append(os.path.join(os.path.dirname(__file__), '../XED-to-XML'))
+sys.path.append(os.path.join(os.path.dirname(os.path.realpath(__file__)), 'XED-to-XML'))
 from disas import allXmlAttributes
 
 def main():
@@ -30,7 +30,7 @@ def main():
          for flag in ['A', 'C', 'O', 'P', 'S', 'Z']:
             rw = flagNode.attrib.get('flag_' + flag + 'F', '')
             hasImmNode = (XMLInstr.find('./operand[@type="imm"]') is not None)
-            if ('r' in rw) or (('cw' in rw) and not (hasImmNode and category in ['SHIFT', 'ROTATE'])):
+            if ('r' in rw) or ('cw' in rw):
                readFlags.add(flag)
             if 'w' in rw:
                writtenFlags.add(flag)
