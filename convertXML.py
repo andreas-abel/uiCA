@@ -16,6 +16,10 @@ def main():
 
    root = ET.parse(args.xmlfile)
    instrDataForArch = defaultdict(dict)
+   perfDataForArch = defaultdict(list)
+   perfDataForArchIdxDict = defaultdict(dict)
+   attrDataForArch = defaultdict(list)
+   attrDataForArchIdxDict = defaultdict(dict)
    for XMLInstr in root.iter('instruction'):
       iform = XMLInstr.attrib['iform']
       instrString = XMLInstr.attrib['string']
@@ -43,7 +47,14 @@ def main():
                instrDataForArch[archNode.attrib['name']][iform] = []
             instrDataForArch[archNode.attrib['name']][iform].append(instrData)
 
-            instrData['attributes'] = attr
+            attrRepr = repr(attr)
+            curAttrDataForArch = attrDataForArch[archNode.attrib['name']]
+            curAttrDataForArchIdxDict = attrDataForArchIdxDict[archNode.attrib['name']]
+            if attrRepr not in curAttrDataForArchIdxDict:
+               curAttrDataForArchIdxDict[attrRepr] = len(curAttrDataForArch)
+               curAttrDataForArch.append(attr)
+            instrData['attr'] = curAttrDataForArchIdxDict[attrRepr]
+
             instrData['string'] = instrString
             if XMLInstr.attrib.get('locked', '') == '1':
                instrData['locked'] = 1
@@ -53,6 +64,7 @@ def main():
             if writtenFlags:
                instrData['flagsW'] = writtenFlags
 
+            perfData = {}
             for mSuffix, iSuffix in [('', ''), ('_same_reg', '_SR'), ('_indexed', '_I')]:
                for mKey, iKey in [('uops', 'uops'), ('uops_retire_slots', 'retSlots'), ('uops_MITE', 'uopsMITE'), ('uops_MS', 'uopsMS'),
                                   ('div_cycles', 'divC'), ('complex_decoder', 'complDec'), ('available_simple_decoders', 'sDec')]:
@@ -61,21 +73,24 @@ def main():
                   else:
                      mValue = measurementNode.attrib.get(mKey+mSuffix)
                   if mValue is not None:
-                     instrData[iKey+iSuffix] = int(mValue)
+                     perfData[iKey+iSuffix] = int(mValue)
                if instrString in ['CPUID', 'MFENCE', 'PAUSE', 'RDTSC'] or XMLInstr.attrib.get('locked', '') == '1':
                   TP_loop = measurementNode.attrib.get('TP_loop'+mSuffix)
                   TP_unrolled = measurementNode.attrib.get('TP_unrolled'+mSuffix)
                   TPs = [int(float(tp)) for tp in [TP_loop, TP_unrolled] if tp is not None]
                   if TPs:
-                     instrData['TP'+iSuffix] = min(TPs)
+                     perfData['TP'+iSuffix] = min(TPs)
 
                ports = measurementNode.attrib.get('ports'+mSuffix)
                if ports is not None: # ToDo: AMD
-                  if XMLInstr.attrib['category'] == 'COND_BR' and ports == '1*p06':
+                  if (archNode.attrib['name'] not in ['ICL', 'TGL']) and (XMLInstr.attrib['category'] == 'COND_BR') and (ports == '1*p06'):
                      ports = '1*p6' # taken branches can only use port 6
-                  instrData['ports'+iSuffix] = {p.replace('p', ''): int(n) for np in ports.split('+') for n, p in [np.split('*')]}
-               elif instrData.get('uops'+iSuffix, -1) == 0:
-                  instrData['ports'+iSuffix] = {}
+                  perfData['ports'+iSuffix] = {p.replace('p', ''): int(n) for np in ports.split('+') for n, p in [np.split('*')]}
+               elif perfData.get('uops'+iSuffix, -1) == 0:
+                  perfData['ports'+iSuffix] = {}
+
+
+
 
             #divCycles = measurementNode.attrib.get('div_cycles')
             #if divCycles is not None:
@@ -105,9 +120,17 @@ def main():
                   latData[(startOp, targetOp, 'mem')] = int(latNode.attrib['cycles_mem'])
 
             if latData:
-               instrData['lat'] = latData
+               perfData['lat'] = latData
             if latDataSameReg:
-               instrData['lat_SR'] = latDataSameReg
+               perfData['lat_SR'] = latDataSameReg
+
+            perfRepr = repr(perfData)
+            curPerfDataForArch = perfDataForArch[archNode.attrib['name']]
+            curPerfDataForArchIdxDict = perfDataForArchIdxDict[archNode.attrib['name']]
+            if perfRepr not in curPerfDataForArchIdxDict:
+               curPerfDataForArchIdxDict[perfRepr] = len(curPerfDataForArch)
+               curPerfDataForArch.append(perfData)
+            instrData['perfData'] = curPerfDataForArchIdxDict[perfRepr]
 
 
    path = 'instrData'
@@ -120,9 +143,12 @@ def main():
 
    open(os.path.join(path, '__init__.py'), 'a').close()
 
-   for arch, instrData in instrDataForArch.items():
+   for arch in instrDataForArch.keys():
+      #print len(list(x[0]['perf'] for _, x in instrData.items()))
       with open(os.path.join(path, arch + '.py'), 'w') as f:
-         f.write('instrData = ' + repr(instrData) + '\n')
+         f.write('instrData = ' + repr(instrDataForArch[arch]) + '\n')
+         f.write('perfData = ' + repr(perfDataForArch[arch]) + '\n')
+         f.write('attrData = ' + repr(attrDataForArch[arch]) + '\n')
 
 
 if __name__ == "__main__":

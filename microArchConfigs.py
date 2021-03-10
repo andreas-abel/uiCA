@@ -1,6 +1,12 @@
+import copy
+
 class MicroArchConfig:
-   def __init__(self, IQWidth, nDecoders, DSBWidth, IDQWidth, issueWidth, RBWidth, RSWidth, retireWidth, allPorts, pop5CRequiresComplexDecoder,
-                macroFusibleInstrCanBeDecodedAsLastInstr, branchCanBeLastInstrInCachedBlock, both32ByteBlocksMustBeCacheable, stackSyncUopPorts, preDecodeWidth=5, predecodeDecodeDelay=3, issueDispatchDelay=5, DSB_MS_Stall=4, pop5CEndsDecodeGroup=True):
+   def __init__(self, name, XEDName, IQWidth, nDecoders, DSBWidth, IDQWidth, issueWidth, RBWidth, RSWidth, retireWidth, allPorts, pop5CRequiresComplexDecoder,
+                macroFusibleInstrCanBeDecodedAsLastInstr, branchCanBeLastInstrInCachedBlock, both32ByteBlocksMustBeCacheable, stackSyncUopPorts, preDecodeWidth=5,
+                predecodeDecodeDelay=3, issueDispatchDelay=5, DSB_MS_Stall=4, pop5CEndsDecodeGroup=True, movzxHigh8AliasCanBeEliminated=True,
+                moveEliminationPipelineLength=2, moveEliminationGPRSlots=4, moveEliminationSIMDSlots=4, moveEliminationGPRAllAliasesMustBeOverwritten=True, LSDEnabled=True, fastPointerChasing=True):
+      self.name = name
+      self.XEDName = XEDName # see obj/wkit/bin/xed -chip-check-list
       self.IQWidth = IQWidth # width of the instruction queue
       self.nDecoders = nDecoders # number of decoders
       self.DSBWidth = DSBWidth
@@ -24,10 +30,19 @@ class MicroArchConfig:
       self.issueDispatchDelay = issueDispatchDelay # minimum delay between issuing and dispatching
       self.DSB_MS_Stall = DSB_MS_Stall # number of stall cycles when switching from DSB to MS
       self.pop5CEndsDecodeGroup = pop5CEndsDecodeGroup # after pop rsp and pop r12, no other instr. can be decoded in the same cycle
+      self.movzxHigh8AliasCanBeEliminated = movzxHigh8AliasCanBeEliminated # whether movzx can be eliminated if the second register has the same encoding as a high8 register
+      self.moveEliminationPipelineLength = moveEliminationPipelineLength
+      self.moveEliminationGPRSlots = moveEliminationGPRSlots # the number of slots or 'unlimited'
+      self.moveEliminationSIMDSlots = moveEliminationSIMDSlots # the number of slots or 'unlimited'
+      self.moveEliminationGPRAllAliasesMustBeOverwritten = moveEliminationGPRAllAliasesMustBeOverwritten
+      self.LSDEnabled = LSDEnabled
+      self.fastPointerChasing = fastPointerChasing
 
 MicroArchConfigs = {}
 
 MicroArchConfigs['SKL'] = MicroArchConfig( # https://en.wikichip.org/wiki/intel/microarchitectures/skylake_(client)#Pipeline
+   name = 'SKL',
+   XEDName = 'SKYLAKE',
    IQWidth = 25,
    nDecoders = 4, # wikichip seems to be wrong
    DSBWidth = 6,
@@ -41,13 +56,22 @@ MicroArchConfigs['SKL'] = MicroArchConfig( # https://en.wikichip.org/wiki/intel/
    macroFusibleInstrCanBeDecodedAsLastInstr = True,
    branchCanBeLastInstrInCachedBlock = False,
    both32ByteBlocksMustBeCacheable = True,
-   stackSyncUopPorts = ['0','1','5','6']
-
+   stackSyncUopPorts = ['0','1','5','6'],
+   movzxHigh8AliasCanBeEliminated = False,
+   moveEliminationPipelineLength = 2,
+   LSDEnabled = False,
+   DSB_MS_Stall = 2,
 )
-MicroArchConfigs['KBL'] = MicroArchConfigs['SKL']
-MicroArchConfigs['CFL'] = MicroArchConfigs['SKL']
+
+MicroArchConfigs['KBL'] = copy.deepcopy(MicroArchConfigs['SKL'])
+MicroArchConfigs['KBL'].name = 'KBL'
+
+MicroArchConfigs['CFL'] = copy.deepcopy(MicroArchConfigs['SKL'])
+MicroArchConfigs['CFL'].name = 'CFL'
 
 MicroArchConfigs['HSW'] = MicroArchConfig( # https://en.wikichip.org/wiki/intel/microarchitectures/haswell_(client)#Core
+   name = 'HSW',
+   XEDName = 'HASWELL',
    IQWidth = 20,
    nDecoders = 4,
    DSBWidth = 6, # wikichip seems to be wrong
@@ -61,6 +85,59 @@ MicroArchConfigs['HSW'] = MicroArchConfig( # https://en.wikichip.org/wiki/intel/
    macroFusibleInstrCanBeDecodedAsLastInstr = False,
    branchCanBeLastInstrInCachedBlock = True,
    both32ByteBlocksMustBeCacheable = False,
-   stackSyncUopPorts = ['0','1','5','6']
+   stackSyncUopPorts = ['0','1','5','6'],
+   movzxHigh8AliasCanBeEliminated = False,
+   moveEliminationPipelineLength = 2,
+   DSB_MS_Stall = 4,
 )
-MicroArchConfigs['BDW'] = MicroArchConfigs['HSW']
+
+MicroArchConfigs['BDW'] = copy.deepcopy(MicroArchConfigs['HSW'])
+MicroArchConfigs['BDW'].name = 'BDW'
+MicroArchConfigs['BDW'].XEDName = 'BROADWELL'
+
+MicroArchConfigs['IVB'] = MicroArchConfig( # https://en.wikichip.org/wiki/intel/microarchitectures/ivy_bridge_(client)
+   name = 'IVB',
+   XEDName = 'IVYBRIDGE',
+   IQWidth = 20,
+   nDecoders = 4,
+   DSBWidth = 6, # ?
+   IDQWidth = 56,
+   issueWidth = 4,
+   RBWidth = 168,
+   RSWidth = 54,
+   retireWidth = 4,
+   allPorts = [str(i) for i in range(0,6)],
+   pop5CRequiresComplexDecoder = True, #?
+   macroFusibleInstrCanBeDecodedAsLastInstr = False, #?
+   branchCanBeLastInstrInCachedBlock = True, #?
+   both32ByteBlocksMustBeCacheable = False, #?
+   stackSyncUopPorts = ['0','1','5'], #?
+   moveEliminationPipelineLength = 3,
+   moveEliminationGPRAllAliasesMustBeOverwritten = False
+)
+
+MicroArchConfigs['ICL'] = MicroArchConfig( # https://en.wikichip.org/wiki/intel/microarchitectures/sunny_cove
+   name = 'ICL',
+   XEDName = 'ICE_LAKE',
+   IQWidth = 25, # ?
+   nDecoders = 4, # ?
+   DSBWidth = 6,
+   IDQWidth = 70,
+   issueWidth = 5,
+   RBWidth = 352,
+   RSWidth = 160,
+   retireWidth = 5, #?
+   allPorts = [str(i) for i in range(0,10)],
+   pop5CRequiresComplexDecoder = False, #?
+   macroFusibleInstrCanBeDecodedAsLastInstr = True, # ?
+   branchCanBeLastInstrInCachedBlock = True, # ?
+   both32ByteBlocksMustBeCacheable = True, # ?
+   stackSyncUopPorts = ['0','1','5','6'],
+   movzxHigh8AliasCanBeEliminated = False, # ?
+   moveEliminationPipelineLength = 2, # ToDo
+   LSDEnabled = True,
+   DSB_MS_Stall = 2,
+   fastPointerChasing = False,
+   moveEliminationGPRSlots = 0,
+   moveEliminationSIMDSlots = 'unlimited'
+)
