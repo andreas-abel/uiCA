@@ -4,7 +4,8 @@ class MicroArchConfig:
    def __init__(self, name, XEDName, IQWidth, nDecoders, DSBWidth, IDQWidth, issueWidth, RBWidth, RSWidth, retireWidth, allPorts, pop5CRequiresComplexDecoder,
                 macroFusibleInstrCanBeDecodedAsLastInstr, branchCanBeLastInstrInCachedBlock, both32ByteBlocksMustBeCacheable, stackSyncUopPorts, preDecodeWidth=5,
                 predecodeDecodeDelay=3, issueDispatchDelay=5, DSB_MS_Stall=4, pop5CEndsDecodeGroup=True, movzxHigh8AliasCanBeEliminated=True,
-                moveEliminationPipelineLength=2, moveEliminationGPRSlots=4, moveEliminationSIMDSlots=4, moveEliminationGPRAllAliasesMustBeOverwritten=True, LSDEnabled=True, fastPointerChasing=True):
+                moveEliminationPipelineLength=2, moveEliminationGPRSlots=4, moveEliminationSIMDSlots=4, moveEliminationGPRAllAliasesMustBeOverwritten=True,
+                LSDEnabled=True, LSDUnrolling=lambda x:1, fastPointerChasing=True):
       self.name = name
       self.XEDName = XEDName # see obj/wkit/bin/xed -chip-check-list
       self.IQWidth = IQWidth # width of the instruction queue
@@ -36,6 +37,7 @@ class MicroArchConfig:
       self.moveEliminationSIMDSlots = moveEliminationSIMDSlots # the number of slots or 'unlimited'
       self.moveEliminationGPRAllAliasesMustBeOverwritten = moveEliminationGPRAllAliasesMustBeOverwritten
       self.LSDEnabled = LSDEnabled
+      self.LSDUnrolling = LSDUnrolling
       self.fastPointerChasing = fastPointerChasing
 
 MicroArchConfigs = {}
@@ -89,6 +91,7 @@ MicroArchConfigs['HSW'] = MicroArchConfig( # https://en.wikichip.org/wiki/intel/
    movzxHigh8AliasCanBeEliminated = False,
    moveEliminationPipelineLength = 2,
    DSB_MS_Stall = 4,
+   LSDUnrolling = lambda x: {1:8,2:8,3:8,4:8,5:6,6:5,7:4,9:3,10:3,11:3}.get(x) or (2 if 13<=x<=27 else 1)
 )
 
 MicroArchConfigs['BDW'] = copy.deepcopy(MicroArchConfigs['HSW'])
@@ -113,7 +116,8 @@ MicroArchConfigs['IVB'] = MicroArchConfig( # https://en.wikichip.org/wiki/intel/
    both32ByteBlocksMustBeCacheable = False, #?
    stackSyncUopPorts = ['0','1','5'], #?
    moveEliminationPipelineLength = 3,
-   moveEliminationGPRAllAliasesMustBeOverwritten = False
+   moveEliminationGPRAllAliasesMustBeOverwritten = False,
+   LSDUnrolling = lambda x: {1:8,2:8,3:8,4:8,5:6,6:5,7:4,9:3,10:3,11:3}.get(x) or (2 if 13<=x<=27 else 1) # ToDo: check this
 )
 
 MicroArchConfigs['ICL'] = MicroArchConfig( # https://en.wikichip.org/wiki/intel/microarchitectures/sunny_cove
@@ -139,5 +143,6 @@ MicroArchConfigs['ICL'] = MicroArchConfig( # https://en.wikichip.org/wiki/intel/
    DSB_MS_Stall = 2,
    fastPointerChasing = False,
    moveEliminationGPRSlots = 0,
-   moveEliminationSIMDSlots = 'unlimited'
+   moveEliminationSIMDSlots = 'unlimited',
+   LSDUnrolling = lambda x: {1:6,2:6,3:6,4:6,5:6,6:6,7:4,8:4,9:3,10:3,11:3,12:3}.get(x) or (2 if 13<=x<=30 else 1)
 )

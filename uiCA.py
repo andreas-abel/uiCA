@@ -18,8 +18,6 @@ from disas import *
 
 clock = 0
 uArchConfig = None
-LSDUnrolling = lambda x: {1:8,2:8,3:8,4:8,5:6,6:5,7:4,9:3,10:3,11:3}.get(x) or (2 if 13<=x<=27 else 1)
-
 
 class UopProperties:
    def __init__(self, instr, possiblePorts, inputOperands, outputOperands, latencies, divCycles=0, isLoadUop=False, isStoreAddressUop=False, memAddr=None,
@@ -437,7 +435,7 @@ class Renamer:
 
 
 class FrontEnd:
-   def __init__(self, instructions, reorderBuffer, scheduler, unroll):
+   def __init__(self, instructions, reorderBuffer, scheduler, unroll, simpleFrontEnd=False):
       self.IDQ = deque()
       self.renamer = Renamer(self.IDQ, reorderBuffer)
       self.reorderBuffer = reorderBuffer
@@ -459,8 +457,12 @@ class FrontEnd:
 
       self.LSDUnrollCount = 1
 
-      self.uopSource = 'MITE'
-      if unroll:
+      if simpleFrontEnd:
+         self.uopSource = None
+      else:
+         self.uopSource = 'MITE'
+
+      if unroll or simpleFrontEnd:
          self.cacheBlockGenerator = CacheBlockGenerator(instructions, True)
       else:
          self.cacheBlocksForNextRoundGenerator = CacheBlocksForNextRoundGenerator(instructions)
@@ -472,7 +474,7 @@ class FrontEnd:
          #print  [self.canBeCached(block) for cb in cacheBlocksForFirstRound for block in split64ByteBlockTo32ByteBlocks(cb) if block]
          if allBlocksCanBeCached and uArchConfig.LSDEnabled and allInstrsCanBeUsedByLSD and (nUops <= uArchConfig.IDQWidth):
             self.uopSource = 'LSD'
-            self.LSDUnrollCount = LSDUnrolling(nUops)
+            self.LSDUnrollCount = uArchConfig.LSDUnrolling(nUops)
             #print nUops
             #print self.LSDUnrollCount
             for cacheBlock in cacheBlocksForFirstRound + [cb for _ in xrange(0, self.LSDUnrollCount-1) for cb in next(self.cacheBlocksForNextRoundGenerator)]:
@@ -499,7 +501,15 @@ class FrontEnd:
       if len(self.IDQ) + uArchConfig.DSBWidth > uArchConfig.IDQWidth:
          return
 
-      if self.uopSource == 'LSD':
+      if self.uopSource is None:
+         while len(self.IDQ) < uArchConfig.issueWidth:
+            for instrI in next(self.cacheBlockGenerator):
+               self.allGeneratedInstrInstances.append(instrI)
+               for lamUop in instrI.uops:
+                  self.addStackSyncUop(lamUop.getUnfusedUops()[0])
+                  for uop in lamUop.getUnfusedUops():
+                     self.IDQ.append(LaminatedUop([FusedUop([uop])]))
+      elif self.uopSource == 'LSD':
          if not self.IDQ:
             for _ in xrange(0, self.LSDUnrollCount):
                for cacheBlock in next(self.cacheBlocksForNextRoundGenerator):
@@ -894,7 +904,7 @@ class Scheduler:
          uop9 = self.readyQueue['9'][0][1]
          addr4 = uop4.storeBufferEntry.abstractAddress
          addr9 = uop9.storeBufferEntry.abstractAddress
-         if (addr4[0] != addr9[0]) or (addr4[1] != addr9[1]) or (addr4[2] != addr9[2]) or (abs(addr4[3]-addr9[3]) >= 64):
+         if addr4 and addr9 and ((addr4[0] != addr9[0]) or (addr4[1] != addr9[1]) or (addr4[2] != addr9[2]) or (abs(addr4[3]-addr9[3]) >= 64)):
             if uop4.idx <= uop9.idx:
                applicablePorts.remove('9')
             else:
@@ -1027,7 +1037,8 @@ class Scheduler:
                applicablePortUsages = [(p,u) for p, u in self.portUsageAtStartOfCycle.get(clock-1, self.portUsageAtStartOfCycle[clock]).items()
                                        if p in uop.prop.possiblePorts]
                sortedPortUsages = sorted(applicablePortUsages, key=lambda x: (x[1], -int(x[0])))
-               sortedPorts = [p for p, _ in sortedPortUsages]
+               minPortUsage = sortedPortUsages[0][1]
+               sortedPorts = [p for p, u in sortedPortUsages if u < minPortUsage + 5]
 
                PC = frozenset(uop.prop.possiblePorts)
                nPC = portCombinationsInCurCycle.get(PC, 0)
@@ -1047,7 +1058,7 @@ class Scheduler:
                elif (issueSlot == 3) and (nPC == 0) and (len(sortedPorts) > 1):
                   port = sortedPorts[1]
                else:
-                  port = sortedPorts[nPC % len(PC)]
+                  port = sortedPorts[nPC % len(sortedPorts)]
             elif len(uArchConfig.allPorts) == 8: # or len(uArchConfig.allPorts) == 10:
                applicablePortUsages = [(p,u) for p, u in self.portUsageAtStartOfCycle[clock].items() if p in uop.prop.possiblePorts]
                minPort, minPortUsage = min(applicablePortUsages, key=lambda x: (x[1], -int(x[0]))) # port with minimum usage so far
@@ -1386,6 +1397,7 @@ def getInstructions(filename, rawFile, iacaMarkers, archData):
    xedBinary = os.path.join(os.path.dirname(os.path.realpath(__file__)), 'XED-to-XML', 'obj', 'wkit', 'bin', 'xed')
    output = subprocess.check_output([xedBinary, '-64', '-v', '4', '-isa-set', '-chip-check', uArchConfig.XEDName, ('-ir' if rawFile else '-i'), filename])
    disas = parseXedOutput(output, iacaMarkers)
+   zmmRegistersInUse = any(('ZMM' in reg) for instrD in disas for reg in instrD.regOperands.values())
 
    instructions = []
    for instrD in disas:
@@ -1552,6 +1564,14 @@ def getInstructions(filename, rawFile, iacaMarkers, archData):
                complexDecoder |= uArchConfig.pop5CRequiresComplexDecoder
                if uArchConfig.pop5CEndsDecodeGroup:
                   nAvailableSimpleDecoders = 0
+
+            if zmmRegistersInUse and any(('MM' in reg) for reg in instrD.regOperands.values()):
+               # if an instruction uses zmm registers, port 1 is not available for other vector instructions
+               for p, u in list(portData.items()):
+                  if ('1' in p) and (p != '1'):
+                     del portData[p]
+                     newP = p.replace('1', '')
+                     portData[newP] = portData.get(newP, 0) + u
 
             instruction = Instr(instrD.asm, instrD.opcode, posNominalOpcode, instrData['string'], portData, uops, retireSlots, uopsMITE, uopsMS, divCycles,
                                 inputRegOperands, inputFlagOperands, inputMemOperands, outputRegOperands, outputFlagOperands, outputMemOperands,
@@ -1946,7 +1966,8 @@ def main():
    parser.add_argument("-arch", help="Microarchitecture", default='CFL')
    parser.add_argument("-trace", help="HTML trace", nargs='?', const='trace.html')
    parser.add_argument("-graph", help="HTML graph", nargs='?', const='graph.html')
-   parser.add_argument("-loop", help="loop", action='store_true')
+   #parser.add_argument("-loop", help="loop", action='store_true')
+   parser.add_argument("-simpleFrontEnd", help="Simulate a simple front end that is only limited by the issue width", action='store_true')
    args = parser.parse_args()
 
    if not args.arch in MicroArchConfigs:
@@ -1957,7 +1978,12 @@ def main():
    uArchConfig = MicroArchConfigs[args.arch]
 
    instructions = getInstructions(args.filename, args.raw, args.iacaMarkers, importlib.import_module('instrData.'+args.arch))
+   if not instructions:
+      print 'no instructions found'
+      exit(0)
+
    lastApplicableInstr = [instr for instr in instructions if not instr.macroFusedWithPrevInstr][-1] # ignore macro-fused instr.
+   unroll = (not instructions[-1].isBranchInstr)
 
    computeUopProperties(instructions)
    adjustLatenciesAndAddMergeUops(instructions)
@@ -1971,7 +1997,7 @@ def main():
    rb = ReorderBuffer(retireQueue)
    scheduler = Scheduler()
 
-   frontEnd = FrontEnd(instructions, rb, scheduler, not args.loop)
+   frontEnd = FrontEnd(instructions, rb, scheduler, unroll, args.simpleFrontEnd)
    #   uopSource = Decoder(uopGenerator, IDQ)
    #else:
    #   uopSource = DSB(uopGenerator, IDQ)
@@ -2037,7 +2063,7 @@ def main():
 
       uops = [instrI.uops for instrI in instrInstances]
       url = None
-      if not isinstance(instrI.instr, UnknownInstr):
+      if not isinstance(instr, UnknownInstr):
          url = getURL(instr.instrStr)
       tableLineData.append(TableLineData(instr.asm, url, uops))
 
