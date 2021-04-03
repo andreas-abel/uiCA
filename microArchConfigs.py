@@ -1,15 +1,14 @@
 import copy
 
 class MicroArchConfig:
-   def __init__(self, name, XEDName, IQWidth, nDecoders, DSBWidth, IDQWidth, issueWidth, RBWidth, RSWidth, retireWidth, allPorts, pop5CRequiresComplexDecoder,
-                macroFusibleInstrCanBeDecodedAsLastInstr, branchCanBeLastInstrInCachedBlock, both32ByteBlocksMustBeCacheable, stackSyncUopPorts, preDecodeWidth=5,
-                predecodeDecodeDelay=3, issueDispatchDelay=5, DSB_MS_Stall=4, pop5CEndsDecodeGroup=True, movzxHigh8AliasCanBeEliminated=True,
+   def __init__(self, name, XEDName, IQWidth, DSBWidth, IDQWidth, issueWidth, RBWidth, RSWidth, retireWidth, allPorts, pop5CRequiresComplexDecoder,
+                macroFusibleInstrCanBeDecodedAsLastInstr, branchCanBeLastInstrInCachedBlock, both32ByteBlocksMustBeCacheable, stackSyncUopPorts, nDecoders=4,
+                preDecodeWidth=5, predecodeDecodeDelay=3, issueDispatchDelay=5, DSB_MS_Stall=4, pop5CEndsDecodeGroup=True, movzxHigh8AliasCanBeEliminated=True,
                 moveEliminationPipelineLength=2, moveEliminationGPRSlots=4, moveEliminationSIMDSlots=4, moveEliminationGPRAllAliasesMustBeOverwritten=True,
                 LSDEnabled=True, LSDUnrolling=lambda x:1, fastPointerChasing=True):
       self.name = name
       self.XEDName = XEDName # see obj/wkit/bin/xed -chip-check-list
       self.IQWidth = IQWidth # width of the instruction queue
-      self.nDecoders = nDecoders # number of decoders
       self.DSBWidth = DSBWidth
       self.IDQWidth = IDQWidth # width of the instruction decode queue
       self.issueWidth = issueWidth # number of (fused-domain) uops that can be issued per cycle
@@ -25,6 +24,7 @@ class MicroArchConfig:
       self.branchCanBeLastInstrInCachedBlock = branchCanBeLastInstrInCachedBlock # probably because of JCC Erratum https://www.intel.com/content/dam/support/us/en/documents/processors/mitigations-jump-conditional-code-erratum.pdf
       self.both32ByteBlocksMustBeCacheable = both32ByteBlocksMustBeCacheable # a 32 byte block can only be in the DSB if the other 32 byte block in the same 64 byte block is also cacheable
       self.stackSyncUopPorts = stackSyncUopPorts # ports that stack pointer synchronization uops can use
+      self.nDecoders = nDecoders # number of decoders
       # ['0','1','5'] if arch in ['CON', 'WOL', 'NHM', 'WSM', 'SNB', 'IVB']
       self.preDecodeWidth = preDecodeWidth # number of instructions that can be predecoded per cycle
       self.predecodeDecodeDelay = predecodeDecodeDelay # minimum delay between predecoding and decoding
@@ -46,7 +46,7 @@ MicroArchConfigs['SKL'] = MicroArchConfig( # https://en.wikichip.org/wiki/intel/
    name = 'SKL',
    XEDName = 'SKYLAKE',
    IQWidth = 25,
-   nDecoders = 4, # wikichip seems to be wrong
+   # nDecoders = 4, # wikichip seems to be wrong
    DSBWidth = 6,
    IDQWidth = 64,
    issueWidth = 4,
@@ -71,11 +71,16 @@ MicroArchConfigs['KBL'].name = 'KBL'
 MicroArchConfigs['CFL'] = copy.deepcopy(MicroArchConfigs['SKL'])
 MicroArchConfigs['CFL'].name = 'CFL'
 
+MicroArchConfigs['CLX'] = copy.deepcopy(MicroArchConfigs['SKL'])
+MicroArchConfigs['CLX'].name = 'CLX'
+MicroArchConfigs['CLX'].XEDName = 'CASCADE_LAKE'
+MicroArchConfigs['CLX'].LSDEnabled = True
+MicroArchConfigs['CLX'].LSDUnrolling = lambda x: {1:2,2:2,3:6,5:6,6:2,7:3,9:3,10:3,11:3,13:3}.get(x) or (2 if 13<=x<=25 else 1)
+
 MicroArchConfigs['HSW'] = MicroArchConfig( # https://en.wikichip.org/wiki/intel/microarchitectures/haswell_(client)#Core
    name = 'HSW',
    XEDName = 'HASWELL',
    IQWidth = 20,
-   nDecoders = 4,
    DSBWidth = 6, # wikichip seems to be wrong
    IDQWidth = 56,
    issueWidth = 4,
@@ -102,7 +107,6 @@ MicroArchConfigs['IVB'] = MicroArchConfig( # https://en.wikichip.org/wiki/intel/
    name = 'IVB',
    XEDName = 'IVYBRIDGE',
    IQWidth = 20,
-   nDecoders = 4,
    DSBWidth = 6, # ?
    IDQWidth = 56,
    issueWidth = 4,
@@ -117,14 +121,17 @@ MicroArchConfigs['IVB'] = MicroArchConfig( # https://en.wikichip.org/wiki/intel/
    stackSyncUopPorts = ['0','1','5'], #?
    moveEliminationPipelineLength = 3,
    moveEliminationGPRAllAliasesMustBeOverwritten = False,
-   LSDUnrolling = lambda x: {1:8,2:8,3:8,4:8,5:6,6:5,7:4,9:3,10:3,11:3}.get(x) or (2 if 13<=x<=27 else 1) # ToDo: check this
+   LSDUnrolling = lambda x: 1
 )
+
+MicroArchConfigs['SNB'] = copy.deepcopy(MicroArchConfigs['IVB'])
+MicroArchConfigs['SNB'].name = 'SNB'
+MicroArchConfigs['SNB'].XEDName = 'SANDYBRIDGE'
 
 MicroArchConfigs['ICL'] = MicroArchConfig( # https://en.wikichip.org/wiki/intel/microarchitectures/sunny_cove
    name = 'ICL',
    XEDName = 'ICE_LAKE',
    IQWidth = 25, # ?
-   nDecoders = 4, # ?
    DSBWidth = 6,
    IDQWidth = 70,
    issueWidth = 5,
@@ -133,7 +140,7 @@ MicroArchConfigs['ICL'] = MicroArchConfig( # https://en.wikichip.org/wiki/intel/
    retireWidth = 5, #?
    allPorts = [str(i) for i in range(0,10)],
    pop5CRequiresComplexDecoder = False, #?
-   macroFusibleInstrCanBeDecodedAsLastInstr = True, # ?
+   macroFusibleInstrCanBeDecodedAsLastInstr = True,
    branchCanBeLastInstrInCachedBlock = True, # ?
    both32ByteBlocksMustBeCacheable = True, # ?
    stackSyncUopPorts = ['0','1','5','6'],
@@ -146,3 +153,7 @@ MicroArchConfigs['ICL'] = MicroArchConfig( # https://en.wikichip.org/wiki/intel/
    moveEliminationSIMDSlots = 'unlimited',
    LSDUnrolling = lambda x: {1:6,2:6,3:6,4:6,5:6,6:6,7:4,8:4,9:3,10:3,11:3,12:3}.get(x) or (2 if 13<=x<=30 else 1)
 )
+
+MicroArchConfigs['TGL'] = copy.deepcopy(MicroArchConfigs['ICL'])
+MicroArchConfigs['TGL'].name = 'TGL'
+MicroArchConfigs['TGL'].XEDName = 'TIGER_LAKE'
