@@ -2,12 +2,14 @@
 
 import importlib
 import os
-import random
 import re
 import sys
 from collections import Counter, defaultdict, deque, namedtuple, OrderedDict
 from heapq import heappop, heappush
 from itertools import chain, count
+
+import random
+random.seed(0)
 
 from x64_lib import *
 from microArchConfigs import MicroArchConfigs
@@ -472,7 +474,11 @@ class FrontEnd:
          self.cacheBlocksForNextRoundGenerator = CacheBlocksForNextRoundGenerator(instructions, self.alignmentOffset)
          cacheBlocksForFirstRound = next(self.cacheBlocksForNextRoundGenerator)
 
-         allBlocksCanBeCached = all(self.canBeCached(block) for cb in cacheBlocksForFirstRound for block in split64ByteBlockTo32ByteBlocks(cb) if block)
+         if uArchConfig.DSBBlockSize == 32:
+            allBlocksCanBeCached = all(self.canBeCached(block) for cb in cacheBlocksForFirstRound for block in split64ByteBlockTo32ByteBlocks(cb) if block)
+         else:
+            allBlocksCanBeCached = all(self.canBeCached(block) for block in cacheBlocksForFirstRound)
+
          allInstrsCanBeUsedByLSD = all(instrI.instr.canBeUsedByLSD() for cb in cacheBlocksForFirstRound for instrI in cb)
          nUops = sum(len(instrI.uops) for cb in cacheBlocksForFirstRound for instrI in cb)
          if allBlocksCanBeCached and uArchConfig.LSDEnabled and allInstrsCanBeUsedByLSD and (nUops <= uArchConfig.IDQWidth):
@@ -540,7 +546,7 @@ class FrontEnd:
          elif self.uopSource == 'DSB':
             newInstrIUops = self.DSB.cycle()
             newUops = [u for _, u in newInstrIUops if u is not None]
-            if newInstrIUops:
+            if newUops and newUops[-1].getUnfusedUops()[-1].prop.isLastUopOfInstr:
                curInstrI = newInstrIUops[-1][0]
                if curInstrI.instr.isBranchInstr or curInstrI.instr.macroFusedWithNextInstr:
                   nextAddr = self.alignmentOffset
@@ -558,41 +564,54 @@ class FrontEnd:
 
    def findCacheableAddresses(self, cacheBlocksForOneRound):
       for cacheBlock in cacheBlocksForOneRound:
-         B32Blocks = [block for block in split64ByteBlockTo32ByteBlocks(cacheBlock) if block]
-         if uArchConfig.both32ByteBlocksMustBeCacheable and any((not self.canBeCached(block)) for block in B32Blocks):
-            return
-         for B32Block in B32Blocks:
-            if self.canBeCached(B32Block):
-               for instrI in B32Block:
+         if uArchConfig.DSBBlockSize == 32:
+            splitCacheBlocks = [block for block in split64ByteBlockTo32ByteBlocks(cacheBlock) if block]
+            if uArchConfig.both32ByteBlocksMustBeCacheable and any((not self.canBeCached(block)) for block in splitCacheBlocks):
+               return
+         else:
+            splitCacheBlocks = [cacheBlock]
+
+         for block in splitCacheBlocks:
+            if self.canBeCached(block):
+               for instrI in block:
                   self.addressesInDSB.add(instrI.address)
             else:
                return
 
-   def canBeCached(self, B32Block):
-      if len(self.getDSBBlocks(B32Block)) > 3:
+   def canBeCached(self, block):
+      if (uArchConfig.DSBBlockSize == 32) and len(self.getDSBBlocks(block)) > 3:
          return False
+      if (uArchConfig.DSBBlockSize == 64) and len(self.getDSBBlocks(block)) > 6:
+         return False
+
       if not uArchConfig.branchCanBeLastInstrInCachedBlock:
          # on SKL, if the next instr. after a branch starts in a new block, the current block cannot be cached
          # ToDo: other microarchitectures
-         lastInstrI = B32Block[-1]
+         lastInstrI = block[-1]
          if lastInstrI.instr.macroFusedWithNextInstr or (lastInstrI.instr.isBranchInstr and (lastInstrI.address%32) + (len(lastInstrI.instr.opcode)//2) >= 32):
             return False
-      B16_1, B16_2 = split32ByteBlockTo16ByteBlocks(B32Block)
-      if B16_1 and B16_2 and ((B16_1[-1].address % 16) + B16_1[-1].instr.posNominalOpcode >= 16):
-         B16_2.insert(0, B16_1.pop())
-      if (B16_1 and B16_1[-1].instr.lcpStall and B16_1[-1].instr.macroFusibleWith and
-            (len([instrI for instrI in B16_2 if instrI.instr.lcpStall and instrI.instr.macroFusibleWith]) >= 2)):
-         # if there are too many instructions with an lcpStall, the block cannot be cached
-         # ToDo: find out why this is and if the check above is always correct
-         return False
+
+      if uArchConfig.DSBBlockSize == 32:
+         B32Blocks = [block]
+      else:
+         B32Blocks = split64ByteBlockTo32ByteBlocks(block)
+      for B32Block in B32Blocks:
+         B16_1, B16_2 = split32ByteBlockTo16ByteBlocks(B32Block)
+         if B16_1 and B16_2 and ((B16_1[-1].address % 16) + B16_1[-1].instr.posNominalOpcode >= 16):
+            B16_2.insert(0, B16_1.pop())
+         if (B16_1 and B16_1[-1].instr.lcpStall and B16_1[-1].instr.macroFusibleWith and
+               (len([instrI for instrI in B16_2 if instrI.instr.lcpStall and instrI.instr.macroFusibleWith]) >= 2)):
+            # if there are too many instructions with an lcpStall, the block cannot be cached
+            # ToDo: find out why this is and if the check above is always correct
+            return False
 
       return True
 
-   def getDSBBlocks(self, B32Block):
+   def getDSBBlocks(self, cacheBlock):
       # see https://www.agner.org/optimize/microarchitecture.pdf, Section 9.3
       posInCurBlock = 6
       DSBBlocks = []
-      for instrI in B32Block:
+      for instrI in cacheBlock:
          instr = instrI.instr
          if instr.macroFusedWithPrevInstr:
             continue
@@ -638,13 +657,20 @@ class FrontEnd:
             for uop in instrI.uops:
                uop.uopSource = 'LSD'
       else:
-         B32Blocks = split64ByteBlockTo32ByteBlocks(cacheBlock)
-         for B32Block in B32Blocks:
-            if not B32Block: continue
-            if B32Block[0].address in self.addressesInDSB:
-               self.DSB.DSBBlockQueue += self.getDSBBlocks(B32Block)
+         if uArchConfig.DSBBlockSize == 32:
+            blocks = split64ByteBlockTo32ByteBlocks(cacheBlock)
+         else:
+            blocks = [cacheBlock]
+         for block in blocks:
+            if not block: continue
+            if block[0].address in self.addressesInDSB:
+               self.DSB.DSBBlockQueue += self.getDSBBlocks(block)
             else:
-               for B16Block in split32ByteBlockTo16ByteBlocks(B32Block):
+               if uArchConfig.DSBBlockSize == 32:
+                  B16Blocks = split32ByteBlockTo16ByteBlocks(block)
+               else:
+                  B16Blocks = split64ByteBlockTo16ByteBlocks(block)
+               for B16Block in B16Blocks:
                   if not B16Block: continue
                   self.preDecoder.B16BlockQueue.append(deque(B16Block))
                   lastInstrI = B16Block[-1]
@@ -721,7 +747,8 @@ class DSB:
          DSBBlock.popleft()
 
          if (entry is not None) and all((e is None) for e in DSBBlock):
-            if (len(self.DSBBlockQueue) > 1) and (self.DSBBlockQueue[1][0].instrI.address // 32 != entry.instrI.address // 32):
+            if (len(self.DSBBlockQueue) > 1) and ((uArchConfig.DSBBlockSize == 64)
+                  or (self.DSBBlockQueue[1][0].instrI.address//32 != entry.instrI.address//32)):
                if entry.instrI.instr.isBranchInstr or entry.instrI.instr.macroFusedWithNextInstr:
                   if (len(DSBBlock) == 5):
                      DSBBlock = deque([None])
@@ -1168,6 +1195,8 @@ class Scheduler:
                continue
             if len(uop.prop.possiblePorts) == 1:
                port = uop.prop.possiblePorts[0]
+            elif uArchConfig.simplePortAssignment:
+               port = random.choice(uop.prop.possiblePorts)
             elif len(uArchConfig.allPorts) == 10:
                applicablePortUsages = [(p,u) for p, u in self.portUsageAtStartOfCycle.get(clock-1, self.portUsageAtStartOfCycle[clock]).items()
                                        if p in uop.prop.possiblePorts]
@@ -1542,7 +1571,7 @@ def computeUopProperties(instructions):
       instr.UopPropertiesList[-1].isLastUopOfInstr = True
 
 
-def getInstructions(filename, rawFile, iacaMarkers, archData):
+def getInstructions(filename, rawFile, iacaMarkers, archData, noMicroFusion=False, noMacroFusion=False):
    xedBinary = os.path.join(os.path.dirname(os.path.realpath(__file__)), 'XED-to-XML', 'obj', 'wkit', 'bin', 'xed')
    output = subprocess.check_output([xedBinary, '-64', '-v', '4', '-isa-set', '-chip-check', uArchConfig.XEDName, ('-ir' if rawFile else '-i'), filename])
    disas = parseXedOutput(output.decode(), iacaMarkers)
@@ -1726,11 +1755,25 @@ def getInstructions(filename, rawFile, iacaMarkers, archData):
                      newP = p.replace('1', '')
                      portData[newP] = portData.get(newP, 0) + u
 
+            if noMicroFusion:
+               retireSlots = max(uops, uopsMITE + uopsMS)
+               uopsMITE = retireSlots - uopsMS
+               if uopsMITE > 4:
+                  uopsMS += uopsMITE - 4
+                  uopsMITE = 4
+               if uopsMITE > 1:
+                  complexDecoder = True
+                  nAvailableSimpleDecoders = min([5-uopsMITE, nAvailableSimpleDecoders, 0 if uopsMS else 3])
+
+            macroFusibleWith = instrData.get('macroFusible', set())
+            if noMacroFusion:
+               macroFusibleWith = set()
+
             instruction = Instr(instrD.asm, instrD.opcode, posNominalOpcode, instrData['string'], portData, uops, retireSlots, uopsMITE, uopsMS, divCycles,
                                 inputRegOperands, inputFlagOperands, inputMemOperands, outputRegOperands, outputFlagOperands, outputMemOperands,
                                 memAddrOperands, agenOperands, latencies, TP, immediate, lcpStall, implicitRSPChange, mayBeEliminated, complexDecoder,
                                 nAvailableSimpleDecoders, hasLockPrefix, isBranchInstr, isSerializingInstr, isLoadSerializing, isStoreSerializing,
-                                instrData.get('macroFusible', set()))
+                                macroFusibleWith)
 
             #print(instruction)
             break
@@ -2120,6 +2163,8 @@ def main():
    parser.add_argument("-graph", help="HTML graph", nargs='?', const='graph.html')
    #parser.add_argument("-loop", help="loop", action='store_true')
    parser.add_argument("-simpleFrontEnd", help="Simulate a simple front end that is only limited by the issue width", action='store_true')
+   parser.add_argument("-noMicroFusion", help="Variant that does not support micro-fusion", action='store_true')
+   parser.add_argument("-noMacroFusion", help="Variant that does not support macro-fusion", action='store_true')
    parser.add_argument("-alignmentOffset", help="Alignment offset (relative to a 64-Byte cache line)", type=int, default=0)
    args = parser.parse_args()
 
@@ -2130,7 +2175,8 @@ def main():
    global uArchConfig
    uArchConfig = MicroArchConfigs[args.arch]
 
-   instructions = getInstructions(args.filename, args.raw, args.iacaMarkers, importlib.import_module('instrData.'+args.arch))
+   instructions = getInstructions(args.filename, args.raw, args.iacaMarkers, importlib.import_module('instrData.'+uArchConfig.name), args.noMicroFusion,
+                                  args.noMacroFusion)
    if not instructions:
       print('no instructions found')
       exit(0)
@@ -2182,10 +2228,11 @@ def main():
    #print(rnd)
    firstRelevantRound = len(uopsForRound) // 2
    lastRelevantRound = len(uopsForRound) - 2 # last round may be incomplete, thus -2
-   for rnd in range(lastRelevantRound, lastRelevantRound - 5, -1):
-      if uopsForRound[firstRelevantRound][lastApplicableInstr][-1].retireIdx == uopsForRound[rnd][lastApplicableInstr][-1].retireIdx:
-         lastRelevantRound = rnd
-         break
+   if lastRelevantRound - firstRelevantRound > 10:
+      for rnd in range(lastRelevantRound, lastRelevantRound - 5, -1):
+         if uopsForRound[firstRelevantRound][lastApplicableInstr][-1].retireIdx == uopsForRound[rnd][lastApplicableInstr][-1].retireIdx:
+            lastRelevantRound = rnd
+            break
 
    uopsForRelRound = uopsForRound[firstRelevantRound:(lastRelevantRound+1)]
 
