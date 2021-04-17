@@ -17,16 +17,12 @@ class MicroArchConfig:
       self.RSWidth = RSWidth # width of the reservation station
       self.retireWidth = retireWidth # number of uops that can be retired per cycle
       self.allPorts = allPorts # list of ports
-      # if arch in ['CON', 'WOL', 'NHM', 'WSM', 'SNB', 'IVB']: return [str(i) for i in range(0,6)]
-      # elif arch in ['HSW', 'BDW', 'SKL', 'SKX', 'KBL', 'CFL', 'CNL']: return [str(i) for i in range(0,8)]
-      # elif arch in ['ICL']: return [str(i) for i in range(0,10)]
       self.pop5CRequiresComplexDecoder = pop5CRequiresComplexDecoder # pop rsp and pop r12 require the complex decoder
       self.macroFusibleInstrCanBeDecodedAsLastInstr = macroFusibleInstrCanBeDecodedAsLastInstr # if True, a macro-fusible instr. can be decoded on the last decoder or when the instruction queue is empty
       self.branchCanBeLastInstrInCachedBlock = branchCanBeLastInstrInCachedBlock # probably because of JCC Erratum https://www.intel.com/content/dam/support/us/en/documents/processors/mitigations-jump-conditional-code-erratum.pdf
       self.stackSyncUopPorts = stackSyncUopPorts # ports that stack pointer synchronization uops can use
       self.both32ByteBlocksMustBeCacheable = both32ByteBlocksMustBeCacheable # a 32 byte block can only be in the DSB if the other 32 byte block in the same 64 byte block is also cacheable
       self.nDecoders = nDecoders # number of decoders
-      # ['0','1','5'] if arch in ['CON', 'WOL', 'NHM', 'WSM', 'SNB', 'IVB']
       self.preDecodeWidth = preDecodeWidth # number of instructions that can be predecoded per cycle
       self.predecodeDecodeDelay = predecodeDecodeDelay # minimum delay between predecoding and decoding
       self.issueDispatchDelay = issueDispatchDelay # minimum delay between issuing and dispatching
@@ -165,7 +161,6 @@ MicroArchConfigs['TGL'].name = 'TGL'
 MicroArchConfigs['TGL'].XEDName = 'TIGER_LAKE'
 
 
-
 MicroArchConfigs['CLX_SimplePorts'] = copy.deepcopy(MicroArchConfigs['CLX'])
 MicroArchConfigs['CLX_SimplePorts'].simplePortAssignment = True
 
@@ -179,3 +174,8 @@ MicroArchConfigs['CLX_noMoveElim'].moveEliminationSIMDSlots = 0
 MicroArchConfigs['CLX_fullMoveElim'] = copy.deepcopy(MicroArchConfigs['CLX'])
 MicroArchConfigs['CLX_fullMoveElim'].moveEliminationGPRSlots = 'unlimited'
 MicroArchConfigs['CLX_fullMoveElim'].moveEliminationSIMDSlots = 'unlimited'
+
+MicroArchConfigs['CLX_SimplePorts_noMoveElim'] = copy.deepcopy(MicroArchConfigs['CLX'])
+MicroArchConfigs['CLX_SimplePorts_noMoveElim'].simplePortAssignment = True
+MicroArchConfigs['CLX_SimplePorts_noMoveElim'].moveEliminationGPRSlots = 0
+MicroArchConfigs['CLX_SimplePorts_noMoveElim'].moveEliminationSIMDSlots = 0
