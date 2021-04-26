@@ -1985,8 +1985,10 @@ def printUopsTable(tableLineData, addHyperlink=True):
 
 def writeHtmlFile(filename, title, head, body):
    with open(filename, "w") as f:
-      f.write('<html>\n'
+      f.write('<!DOCTYPE html>\n'
+              '<html>\n'
               '<head>\n'
+              '<meta charset="utf-8"/>'
               '<title>' + title + '</title>\n'
               + head +
               '</head>\n'
@@ -1997,39 +1999,17 @@ def writeHtmlFile(filename, title, head, body):
 
 
 def generateHTMLTraceTable(filename, instructions, instrInstances, lastRelevantRound, maxCycle):
-   style = []
-   style.append('<style>')
-   style.append('table {border-collapse: collapse}')
-   style.append('table, td, th {border: 1px solid black}')
-   style.append('th {text-align: left; padding: 6px}')
-   style.append('td {text-align: center}')
-   style.append('code {white-space: nowrap}')
-   style.append('</style>')
-   table = []
-   table.append('<table>')
-   table.append('<tr>')
-   table.append('<th rowspan="2">It.</th>')
-   table.append('<th rowspan="2">Instruction</th>')
-   table.append('<th colspan="2" style="text-align:center">&mu;ops</th>')
-   table.append('<th rowspan="2" colspan="{}">Cycles</th>'.format(maxCycle+1))
-   table.append('</tr>')
-   table.append('<tr>')
-   table.append('<th style="text-align:center">Possible Ports</th>')
-   table.append('<th style="text-align:center">Actual Port</th>')
-   table.append('</tr>')
+   import json
 
+   tableDataForRnd = []
    prevRnd = -1
+   prevInstrI = None
    for instrI in instrInstances:
       if prevRnd != instrI.rnd:
          prevRnd = instrI.rnd
-         table.append('<tr style="border-top: 2px solid black">')
          if instrI.rnd > lastRelevantRound:
             break
-         nRowsForRnd = sum(max(len([uop for lamUop in instrI2.regMergeUops+instrI2.stackSyncUops+instrI2.uops for uop in lamUop.getUnfusedUops()]),1)
-                                                                                                   for instrI2 in instrInstances if instrI2.rnd == instrI.rnd)
-         table.append('<td rowspan="{}">{}</td>'.format(nRowsForRnd, instrI.rnd))
-      else:
-         table.append('<tr>')
+         tableDataForRnd.append([])
 
       subInstrs = []
       if instrI.regMergeUops:
@@ -2037,40 +2017,50 @@ def generateHTMLTraceTable(filename, instructions, instrInstances, lastRelevantR
       if instrI.stackSyncUops:
          subInstrs += [('&lt;Stack Sync Uop&gt;', True, [uop for lamUop in instrI.stackSyncUops for uop in lamUop.getUnfusedUops()])]
       if instrI.rnd == 0 and (not isinstance(instrI.instr, UnknownInstr)):
-         string = '<a href="{}">{}</a>'.format(getURL(instrI.instr.instrStr), instrI.instr.asm)
+         string = '<a href="{}" target="_blank">{}</a>'.format(getURL(instrI.instr.instrStr), instrI.instr.asm)
       else:
          string = instrI.instr.asm
       subInstrs += [(string, False, [uop for lamUop in instrI.uops for uop in lamUop.getUnfusedUops()])]
 
       for string, isPseudoInstr, uops in subInstrs:
-         table.append('<td rowspan=\"{}\" style="text-align:left"><code>{}</code></td>'.format(len(uops), string))
-         for uopI, uop in enumerate(uops):
-            if uopI > 0:
-               table.append('<tr>')
-            table.append('<td>{{{}}}</td>'.format(','.join(uop.prop.possiblePorts) if uop.prop.possiblePorts else '-'))
-            table.append('<td>{}</td>'.format(uop.actualPort if uop.actualPort else '-'))
+         tableDataForRnd[-1].append({'str': string, 'uops': []})
 
-            uopEvents = ['' for _ in range(0,maxCycle+1)]
-            for evCycle, ev in [(uop.addedToIDQ, 'Q'), (uop.issued, 'I'), (uop.readyForDispatch, 'r'), (uop.dispatched, 'D'), (uop.executed, 'E'), (uop.retired, 'R'),
-                                (max(op.getReadyCycle() for op in uop.renamedInputOperands) if uop.renamedInputOperands else 0, 'i'),
-                                (max(op.getReadyCycle() for op in uop.renamedOutputOperands) if uop.renamedOutputOperands else None, 'o'),
-                                (instrI.predecoded if not isPseudoInstr else None, 'P')]:
-               if (evCycle is not None) and (evCycle >= 0) and (evCycle <= maxCycle):
-                  uopEvents[evCycle] += ev
-
-            for ev in uopEvents:
-               table.append('<td>{}</td>'.format(ev))
-
-            table.append('</tr>')
+         preDec = None
+         if (not isPseudoInstr):
+            preDec = instrI.predecoded if not instrI.instr.macroFusedWithPrevInstr else prevInstrI.predecoded
 
          if not uops:
-            table.append('<td>-</td><td>-</td>')
-            for cycle in range(0,maxCycle+1):
-               table.append('<td>P</td>' if instrI.predecoded == cycle else '<td></td>')
-            table.append('</tr>')
+            uopData = {}
+            tableDataForRnd[-1][-1]['uops'].append(uopData)
+            uopData['possiblePorts'] = '-'
+            uopData['actualPort'] = '-'
+            uopData['events'] = {}
+            if preDec:
+               uopData['events'][preDec] = 'P'
+         else:
+            for uopI, uop in enumerate(uops):
+               uopData = {}
+               tableDataForRnd[-1][-1]['uops'].append(uopData)
 
-   table.append('</table>')
-   writeHtmlFile(filename, 'Trace', '\n'.join(style), '\n'.join(table))
+               uopData['possiblePorts'] = ('{' + ','.join(uop.prop.possiblePorts) + '}') if uop.prop.possiblePorts else '-'
+               uopData['actualPort'] = uop.actualPort if uop.actualPort else '-'
+               uopData['events'] = {}
+
+               for evCycle, ev in [(preDec, 'P'), (uop.addedToIDQ, 'Q'), (uop.issued, 'I'), (uop.readyForDispatch, 'r'),
+                                   (uop.dispatched, 'D'), (uop.executed, 'E'), (uop.retired, 'R'),
+                                   #(max(op.getReadyCycle() for op in uop.renamedInputOperands) if uop.renamedInputOperands else 0, 'i'),
+                                   #(max(op.getReadyCycle() for op in uop.renamedOutputOperands) if uop.renamedOutputOperands else None, 'o'),
+                                   ]:
+                  if (evCycle is not None) and (evCycle >= 0) and (evCycle <= maxCycle):
+                     uopData['events'][evCycle] = ev
+      prevInstrI = instrI
+
+   with open('traceTemplate.html', 'r') as t:
+      html = t.read()
+      html = html.replace('var tableData = {}', 'var tableData = ' + json.dumps(tableDataForRnd))
+
+      with open(filename, 'w') as f:
+         f.write(html)
 
 
 def generateHTMLGraph(filename, instructions, instrInstances, maxCycle):

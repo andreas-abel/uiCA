@@ -1,0 +1,210 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8"/><title>Execution Trace</title>
+
+<script src="https://ajax.googleapis.com/ajax/libs/jquery/3.6.0/jquery.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/noUiSlider/14.7.0/nouislider.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/wnumb/1.2.0/wNumb.min.js"></script>
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/noUiSlider/14.7.0/nouislider.min.css"/>
+
+<style>
+body {
+    font-family: Helvetica, Arial, sans-serif;
+}
+
+table, td, th {
+    border: 1px solid black;
+}
+
+th, .textCell {
+    padding: 1px 5px;
+}
+
+td {
+    text-align: center;
+}
+
+code {
+    white-space: nowrap;
+
+}
+
+.cycleHeader span {
+    vertical-align: middle;
+    font-weight: normal;
+    font-size: 12px;
+    display: inline-block;
+    min-width: 1em;
+    text-align: center;
+    white-space: nowrap;
+    writing-mode: vertical-rl;
+    transform: rotate(180deg);
+}
+
+.cycleHeader {
+    min-width: 12.5px;
+    position: relative;
+    padding: 1px;
+}
+.cycleHeader::before {
+    content: '';
+    position: absolute;
+    top: 0;
+    left: 0;
+    right: 0;
+    bottom: -10000000px;
+    background-color: #f2f2f2;
+    z-index: -1;
+}
+.cycleHeader:nth-child(even)::before {
+    background-color: white;
+}
+
+.noUi-tooltip {
+    //font-size: 12px;
+    //padding: 3px;
+}
+</style>
+
+<script>
+var tableData = {}
+
+var eventToColor = {
+    "P": "Cyan",
+    "Q": "LightSkyBlue",
+    "I": "Pink",
+    "r": "OrangeRed",
+    "D": "Orange",
+    "E": "Yellow",
+    "R": "ForestGreen",
+}
+
+function createTable() {
+    var slider = document.getElementById('slider')
+    var firstIt = Number(slider.noUiSlider.get()[0])
+    var lastIt = Number(slider.noUiSlider.get()[1])
+
+    var minCycle = Number.MAX_VALUE
+    var maxCycle = 0
+
+    for (let i = firstIt; i <= lastIt; i++) {
+        for (let instr of tableData[i]) {
+            for (let uop of instr.uops) {
+                for (let c in uop.events) {
+                    minCycle = Math.min(minCycle, Number(c))
+                    maxCycle = Math.max(maxCycle, Number(c))
+                }
+            }
+        }
+    }
+
+    tableHtml = '<tr>'
+    tableHtml += '<th rowspan="2" style="vertical-align: bottom">It.</th>'
+    tableHtml += '<th rowspan="2" style="vertical-align: bottom; text-align:left">Instruction</th>'
+    tableHtml += '<th colspan="2">&mu;ops</th>'
+    tableHtml += `<th colspan="${maxCycle+1}" style="text-align:left">Cycle</th>`
+    tableHtml += '</tr>'
+    tableHtml += '<tr>'
+    tableHtml += '<th>Possible Ports</th>'
+    tableHtml += '<th>Actual Ports</th>'
+    for (let i = minCycle; i <= maxCycle; i++) {
+        tableHtml += `<th class="cycleHeader"><span>${i}</span></th>`
+    }
+    tableHtml += '</tr>'
+
+    for (let i = firstIt; i <= lastIt; i++) {
+        var nLinesIt = 0
+        for (let instr of tableData[i]) {
+            nLinesIt += instr.uops.length
+        }
+        tableHtml += '<tr style="border-top: 2px solid black">'
+        tableHtml += `<td rowspan="${nLinesIt}" class="textCell">${i}</td>`
+        for (let [instrI, instr] of tableData[i].entries()) {
+            if (instrI > 0) tableHtml += '<tr>'
+            tableHtml += `<td rowspan="${instr.uops.length}" class="textCell" style="text-align: left"><code>${instr.str}</code></td>`
+
+            for (let [uopI, uop] of instr.uops.entries()) {
+                if (uopI > 0) tableHtml += '<tr>'
+                tableHtml += `<td class="textCell">${uop.possiblePorts}</td>`
+                tableHtml += `<td class="textCell">${uop.actualPort}</td>`
+
+                if (Object.keys(uop.events).length == 0) {
+                    tableHtml += '<td colspan="' + (maxCycle - minCycle + 1) + '"></td></tr>'
+                } else {
+                    minUopCycle = Math.min(...Object.keys(uop.events));
+                    maxUopCycle = Math.max(...Object.keys(uop.events));
+
+                    if (minUopCycle - minCycle > 0)
+                        tableHtml += '<td colspan="' + (minUopCycle - minCycle) + '"></td>'
+
+                    events = Object.entries(uop.events)
+                    for (let j = 0; j < events.length; j++) {
+                        tableHtml += '<td style="background-color:' + eventToColor[events[j][1]] + '">' + events[j][1] + '</td>'
+                        if ((j < events.length - 1) && (Number(events[j+1][0]) > Number(events[j][0]) + 1)) {
+                            bg = `background-image: linear-gradient(to right, ${eventToColor[events[j][1]]} , ${eventToColor[events[j+1][1]]})`
+                            tableHtml += '<td style="' + bg + '" colspan="' + (Number(events[j+1][0]) - Number(events[j][0]) - 1) + '"></td>'
+                        }
+                    }
+                    if (maxUopCycle - minCycle < maxCycle - minCycle) {
+                        tableHtml += '<td colspan="' + ((maxCycle - minCycle) - (maxUopCycle - minCycle)) + '"></td>'
+                    }
+                    tableHtml += '</tr>'
+                }
+            }
+        }
+    }
+
+    $("#traceTable").html(tableHtml)
+}
+
+function createLegend() {
+    legendHtml = ''
+    for (let [ev, expl] of [['P', 'Predecoded'], ['Q', 'Added to IDQ'], ['I', 'Issued'], ['r', 'Ready for dispatch'],
+                              ['D', 'Dispatched'], ['E', 'Executed'], ['R', 'Retired']]) {
+        legendHtml += `<tr><td style="background-color:${eventToColor[ev]}">${ev}</td>`
+        legendHtml += `<td style="padding-left: 10px; text-align:left; border: 0">${expl}</td></tr>`
+    }
+    $("#legendTable").html(legendHtml)
+}
+
+$(document).ready(function() {
+    createLegend()
+
+    var slider = document.getElementById('slider')
+    noUiSlider.create(slider, {
+        start: [0, Math.min(50, tableData.length-1)],
+        connect: true,
+        range: {
+            'min': 0,
+            'max': tableData.length-1
+        },
+        tooltips: true,
+        format: wNumb({
+            decimals: 0
+        }),
+    });
+    slider.noUiSlider.on('change', function (values, handle) {
+        createTable()
+    });
+
+    createTable()
+});
+</script>
+</head>
+<body>
+<h1>Execution Trace</h1>
+
+<table id="legendTable" style="border: 0; border-collapse:separate;"></table>
+
+<p>
+    <div style="display: flex">
+        <div style="padding-right: 30px">Show iterations from/to:</div>
+        <div id="slider" style="max-width: 400px;flex-grow: 1;"></div>
+    </div>
+</p>
+
+<h3></h3>
+<table id="traceTable" style="border-collapse: collapse; overflow:hidden;"></table>
+</body>
+</html>
