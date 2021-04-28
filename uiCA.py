@@ -17,7 +17,6 @@ from microArchConfigs import MicroArchConfigs
 sys.path.append(os.path.join(os.path.dirname(os.path.realpath(__file__)), 'XED-to-XML'))
 from disas import *
 
-
 clock = 0
 uArchConfig = None
 
@@ -60,7 +59,6 @@ class Uop:
       self.executed = None
       self.retired = None
       self.retireIdx = None # how many other uops were already retired in the same cycle
-      #self.relatedUops = [self]
 
    def getUnfusedUops(self):
       return [self]
@@ -772,58 +770,7 @@ class DSB:
          if entry.requiresExtraEntry:
             return retList
 
-
       return retList
-
-      '''
-      retList = []
-      #while B32Block and (len(retList) < uArchConfig.DSBWidth):
-      retListFull = self.addUopsToList(B32Block, retList)
-
-      if not B32Block:
-         self.B32BlockQueue.popleft()
-         self.busy = False
-
-         if self.B32BlockQueue and (not retListFull):
-            prevInstrI = retList[-1][0]
-            if ((prevInstrI.address + len(prevInstrI.instr.opcode)/2 == self.B32BlockQueue[0][0].address) or
-                  ((prevInstrI.instr.isBranchInstr or prevInstrI.instr.macroFusedWithNextInstr) and (self.B32BlockQueue[0][-1].address != prevInstrI.address))):
-               # uops can be delivered from two cache lines in one cycle, but not from both ends of the same cache line
-               self.busy = True
-               B32Block = self.B32BlockQueue[0]
-               #while B32Block and (len(retList) < uArchConfig.DSBWidth):
-               self.addUopsToList(B32Block, retList)
-
-               if not B32Block:
-                  self.B32BlockQueue.popleft()
-                  self.busy = False
-
-      return retList
-      '''
-
-   '''
-   def addUopsToList(self, B32Block, lst):
-      while B32Block and (len(lst) < uArchConfig.DSBWidth):
-         instrI = B32Block.popleft()
-         instr = instrI.instr
-         lamUops = instrI.uops
-         if instr.uopsMITE:
-            for lamUop in lamUops[:instr.uopsMITE]:
-               lamUop.uopSource = 'DSB'
-               lst.append((instrI, lamUop))
-         else:
-            lst.append((instrI, None))
-         if instr.uopsMS:
-            self.MS.addUops(lamUops[instr.uopsMITE:], 'DSB')
-            return True
-         if (instr.immediate is not None) and (not (-2**31 <= instr.immediate < 2**31) or (not (-2**15 <= instr.immediate < 2**15) and len(instr.memAddrOperands) > 0)):
-            return True
-      return (len(lst) >= uArchConfig.DSBWidth)
-
-
-   def isBusy(self):
-      return self.busy
-   '''
 
 
 class MicrocodeSequencer:
@@ -856,7 +803,6 @@ class MicrocodeSequencer:
 
    def isBusy(self):
       return (len(self.uopQueue) > 0) or self.stalled
-
 
 
 class Decoder:
@@ -1354,15 +1300,6 @@ def adjustLatenciesAndAddMergeUops(instructions):
                   for k in list(uop.latencies.keys()):
                      uop.latencies[k] -= 1
 
-
-         '''
-         if instr.hasLockPrefix:
-            for inOp in instr.inputRegOperands:
-               # the latency upper bound in the xml file is usually too pessimistic in these cases
-               if instr.outputRegOperands:
-                  instr.latencies[(inOp, instr.outputMemOperands[0])] = instr.latencies[(inOp, instr.outputRegOperands[0])]
-         '''
-
          if any(high8RegClean[getCanonicalReg(inOp.reg)] for inOp in uop.inputOperands if isinstance(inOp, RegOperand) and (inOp.reg in High8Regs)):
             for key in list(uop.latencies.keys()):
                uop.latencies[key] += 1
@@ -1407,19 +1344,7 @@ def computeUopProperties(instructions):
             storeDataPcs.pop()
 
       instr.UopPropertiesList = []
-      onlyNonMemPcs = (not loadPcs) and (not storeAddressPcs) and (not storeDataPcs)
-      allLatencies = list(set(instr.latencies.values()))
 
-      '''
-      if onlyNonMemPcs and (len(nonMemPcs) == 2) and (len(instr.outputRegOperands) == 1) and (len(allLatencies) == 2):
-         # e.g., setnbe (r8), cmovnz (r64, r64)
-         outOp = instr.outputRegOperands[0]
-         inOps1 = [op for op in instr.inputRegOperands+instr.inputFlagOperands if instr.latencies.get((op, outOp), 1) == allLatencies[0]]
-         inOps2 = [op for op in instr.inputRegOperands+instr.inputFlagOperands if op not in inOps1]
-         instr.UopPropertiesList.append(UopProperties(instr, nonMemPcs[0], inOps1, [outOp]))
-         instr.UopPropertiesList.append(UopProperties(instr, nonMemPcs[1], inOps2, [outOp]))
-      else:
-      '''
       loadUopProps = []
       storeUopProps = []
       nonMemUopProps = deque()
@@ -1437,7 +1362,6 @@ def computeUopProperties(instructions):
          memAddr = None
          if instr.inputMemOperands:
             memAddr = instr.inputMemOperands[min(i, len(instr.inputMemOperands) - 1)].memAddr
-         #outputOperands = instr.outputRegOperands + instr.outputFlagOperands + instr.outputMemOperands
          uopLatencies = {outOp: 5 for outOp in outputOperands} # ToDo: actual latencies
          loadUopProps.append(UopProperties(instr, pc, inputOperands, outputOperands, uopLatencies, isLoadUop=True, memAddr=memAddr))
 
@@ -1532,36 +1456,8 @@ def computeUopProperties(instructions):
                else:
                   nonMemUopProps.append(UopProperties(instr, pc, nonMemInputOperands, [], {}))
 
-      '''
-      lat1OutputRegs = [] # output register/flag operands that have a latency of at most 1 from all input registers
-      lat1InputOperands = set() # input operands that have a latency of 1 to the output operands in lat1OutputRegs
-      for outOp in instr.outputRegOperands + instr.outputFlagOperands:
-         if all(instr.latencies.get((inOp, outOp), 2) <= 1 for inOp in allInputOperands):
-            lat1OutputRegs.append(outOp)
-            lat1InputOperands.update(inOp for inOp in allInputOperands if instr.latencies.get((inOp, outOp), 2) == 1)
-
-      nonLat1OutputOperands = instr.outputRegOperands + instr.outputFlagOperands + instr.outputMemOperands
-      divCyclesAdded = False
-      for i, pc in enumerate(nonMemPcs):
-         if (i == 0) and (len(nonMemPcs) > 1) and lat1OutputRegs:
-            applicableInputOperands = list(lat1InputOperands)
-            applicableOutputOperands = lat1OutputRegs
-            nonLat1OutputOperands = [op for op in nonLat1OutputOperands if not op in lat1OutputRegs]
-         else:
-            applicableInputOperands = allInputOperands
-            applicableOutputOperands = nonLat1OutputOperands
-
-         divCycles = 0
-         if instr.divCycles and not divCyclesAdded and pc == ['0']:
-            divCycles = instr.divCycles
-            divCyclesAdded = True
-
-         instr.UopPropertiesList.append(UopProperties(instr, pc, applicableInputOperands, applicableOutputOperands, divCycles))
-      '''
-
       # nonMemUopProps need to come after loadUopProps, and storeUopProps after nonMemUopProps because of PseudoOps and micro-fusion
       instr.UopPropertiesList = loadUopProps + list(nonMemUopProps) + storeUopProps
-
 
       for _ in range(0, instr.retireSlots - len(instr.UopPropertiesList)):
          uopProp = UopProperties(instr, None, [], [], {})
@@ -1982,7 +1878,6 @@ def printUopsTable(tableLineData, addHyperlink=True):
    print(sumLine)
 
 
-
 def writeHtmlFile(filename, title, head, body):
    with open(filename, "w") as f:
       f.write('<!DOCTYPE html>\n'
@@ -2171,26 +2066,20 @@ def main():
       print('no instructions found')
       exit(0)
 
-   lastApplicableInstr = [instr for instr in instructions if not instr.macroFusedWithPrevInstr][-1] # ignore macro-fused instr.
-   unroll = (not instructions[-1].isBranchInstr)
-
    computeUopProperties(instructions)
+
    adjustLatenciesAndAddMergeUops(instructions)
    #print(instructions)
 
    global clock
    clock = 0
 
-   #uopGenerator = UopGenerator(instructions)
    retireQueue = deque()
    rb = ReorderBuffer(retireQueue)
    scheduler = Scheduler()
 
+   unroll = (not instructions[-1].isBranchInstr)
    frontEnd = FrontEnd(instructions, rb, scheduler, unroll, args.alignmentOffset, args.simpleFrontEnd)
-   #   uopSource = Decoder(uopGenerator, IDQ)
-   #else:
-   #   uopSource = DSB(uopGenerator, IDQ)
-
 
    #nRounds = 10 + 1000//len(instructions)
    uopsForRound = []
@@ -2213,9 +2102,7 @@ def main():
 
       clock += 1
 
-   TP = None
-
-   #print(rnd)
+   lastApplicableInstr = [instr for instr in instructions if not instr.macroFusedWithPrevInstr][-1] # ignore macro-fused instr.
    firstRelevantRound = len(uopsForRound) // 2
    lastRelevantRound = len(uopsForRound) - 2 # last round may be incomplete, thus -2
    if lastRelevantRound - firstRelevantRound > 10:
@@ -2227,7 +2114,6 @@ def main():
    uopsForRelRound = uopsForRound[firstRelevantRound:(lastRelevantRound+1)]
 
    TP = float(uopsForRelRound[-1][lastApplicableInstr][-1].retired - uopsForRelRound[0][lastApplicableInstr][-1].retired) / (len(uopsForRelRound)-1)
-   #TP = max(float((uop2.retired-uop1.retired)) for d in uopsRoundDict.values() for (uop1, uop2) in zip(d[25], d[nRounds-25]))/(nRounds-50)
 
    print('TP: {:.2f}'.format(TP))
    print('')
