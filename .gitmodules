@@ -1,3 +1,6 @@
 [submodule "XED-to-XML"]
 	path = XED-to-XML
 	url = https://github.com/andreas-abel/XED-to-XML.git
+[submodule "mbuild"]
+	path = mbuild
+	url = https://github.com/intelxed/mbuild.git
