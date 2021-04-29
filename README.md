@@ -2,13 +2,14 @@
 
 ## Installation
 
-    git clone ...
-    wget https://www.uops.info/instructions.xml
-    ./convertXML.py instructions.xml
+    git clone ...    
     git submodule init
     git submodule update --recursive --remote
     cd XED-to-XML
     ./mfile.py examples
+    cd ..
+    wget https://www.uops.info/instructions.xml
+    ./convertXML.py instructions.xml
 
 ## Example Usage
 
