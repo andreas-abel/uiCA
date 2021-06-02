@@ -7,6 +7,7 @@ import sys
 from collections import Counter, defaultdict, deque, namedtuple, OrderedDict
 from heapq import heappop, heappush
 from itertools import chain, count
+from typing import List, Set, Dict
 
 import random
 random.seed(0)
@@ -47,18 +48,15 @@ class Uop:
       self.idx = next(self.idx_iter)
       self.prop = prop # instance of UopProperties
       self.instrI = instrI # InstructionInstance
+      self.fusedUop = None # fused-domain uop that contains this
       self.actualPort = None
       self.eliminated = False
       self.renamedInputOperands = [] # [op[1] for op in inputOperands] # [(instrInputOperand, renamedInpOperand), ...]
       self.renamedOutputOperands = [] # [op[1] for op in outputOperands]
       self.storeBufferEntry = None
-      self.addedToIDQ = None
-      self.issued = None
       self.readyForDispatch = None
       self.dispatched = None
       self.executed = None
-      self.retired = None
-      self.retireIdx = None # how many other uops were already retired in the same cycle
 
    def getUnfusedUops(self):
       return [self]
@@ -68,20 +66,29 @@ class Uop:
 
 
 class FusedUop:
-   def __init__(self, uops):
-      self.uops = uops
+   def __init__(self, uops: List[Uop]):
+      self.__uops = uops
+      for uop in uops:
+         uop.fusedUop = self
+      self.laminatedUop = None # laminated-domain uop that contains this
+      self.issued = None # cycle in which this uop was issued
+      self.retired = None # cycle in which this uop was retired
+      self.retireIdx = None # how many other uops were already retired in the same cycle
 
    def getUnfusedUops(self):
-      return self.uops
+      return self.__uops
 
 
 class LaminatedUop:
-   def __init__(self, fusedUops):
-      self.fusedUops = fusedUops
-      self.uopSource = None
+   def __init__(self, fusedUops: List[FusedUop]):
+      self.__fusedUops = fusedUops
+      for fUop in fusedUops:
+         fUop.laminatedUop = self
+      self.addedToIDQ = None # cycle in which this uop was added to the IDQ
+      self.uopSource = None # MITE, DSB, MS, LSD, or SE
 
    def getFusedUops(self):
-      return self.fusedUops
+      return self.__fusedUops
 
    def getUnfusedUops(self):
       return [uop for fusedUop in self.getFusedUops() for uop in fusedUop.getUnfusedUops()]
@@ -454,7 +461,7 @@ class FrontEnd:
 
       self.RSPOffset = 0
 
-      self.allGeneratedInstrInstances = []
+      self.allGeneratedInstrInstances: List[InstrInstance] = []
 
       self.DSB = DSB(self.MS)
       self.addressesInDSB = set()
@@ -497,8 +504,7 @@ class FrontEnd:
          issueUops = self.renamer.cycle()
 
       for fusedUop in issueUops:
-         for uop in fusedUop.getUnfusedUops():
-            uop.issued = clock
+         fusedUop.issued = clock
 
       self.reorderBuffer.cycle(issueUops)
       self.scheduler.cycle(issueUops)
@@ -556,12 +562,11 @@ class FrontEnd:
          for lamUop in newUops:
             self.addStackSyncUop(lamUop.getUnfusedUops()[0])
             self.IDQ.append(lamUop)
-            for uop in lamUop.getUnfusedUops():
-               uop.addedToIDQ = clock
+            lamUop.addedToIDQ = clock
 
 
-   def findCacheableAddresses(self, cacheBlocksForOneRound):
-      for cacheBlock in cacheBlocksForOneRound:
+   def findCacheableAddresses(self, cacheBlocksForFirstRound):
+      for cacheBlock in cacheBlocksForFirstRound:
          if uArchConfig.DSBBlockSize == 32:
             splitCacheBlocks = [block for block in split64ByteBlockTo32ByteBlocks(cacheBlock) if block]
             if uArchConfig.both32ByteBlocksMustBeCacheable and any((not self.canBeCached(block)) for block in splitCacheBlocks):
@@ -652,6 +657,7 @@ class FrontEnd:
       if self.uopSource == 'LSD':
          for instrI in cacheBlock:
             self.IDQ.extend(instrI.uops)
+            instrI.source = 'LSD'
             for uop in instrI.uops:
                uop.uopSource = 'LSD'
       else:
@@ -662,8 +668,12 @@ class FrontEnd:
          for block in blocks:
             if not block: continue
             if block[0].address in self.addressesInDSB:
+               for instrI in block:
+                  instrI.source = 'DSB'
                self.DSB.DSBBlockQueue += self.getDSBBlocks(block)
             else:
+               for instrI in block:
+                  instrI.source = 'MITE'
                if uArchConfig.DSBBlockSize == 32:
                   B16Blocks = split32ByteBlockTo16ByteBlocks(block)
                else:
@@ -697,9 +707,10 @@ class FrontEnd:
 
       if requiresSyncUop:
          stackSyncUop = StackSyncUop(uop.instrI)
-         stackSyncUop.addedToIDQ = clock
          lamUop = LaminatedUop([FusedUop([stackSyncUop])])
          self.IDQ.append(lamUop)
+         lamUop.addedToIDQ = clock
+         lamUop.uopSource = 'SE'
          uop.instrI.stackSyncUops.append(lamUop)
 
 
@@ -815,9 +826,10 @@ class Decoder:
       nDecodedInstrs = 0
       remainingDecoderSlots = uArchConfig.nDecoders
       while self.instructionQueue:
-         instrI = self.instructionQueue[0]
+         instrI: InstrInstance = self.instructionQueue[0]
          if instrI.instr.macroFusedWithPrevInstr:
             self.instructionQueue.popleft()
+            instrI.removedFromIQ = clock
             continue
          if instrI.predecoded + uArchConfig.predecodeDecodeDelay > clock:
             break
@@ -831,6 +843,7 @@ class Decoder:
          #if instrI.instr.macroFusibleWith and ():
          #   break
          self.instructionQueue.popleft()
+         instrI.removedFromIQ = clock
 
          if instrI.instr.uopsMITE:
             for lamUop in instrI.uops[:instrI.instr.uopsMITE]:
@@ -931,9 +944,8 @@ class ReorderBuffer:
          if all((u.executed is not None and u.executed < clock) for u in unfusedUops):
             self.uops.popleft()
             self.retireQueue.append(fusedUop)
-            for u in unfusedUops:
-               u.retired = clock
-               u.retireIdx = nRetiredInSameCycle
+            fusedUop.retired = clock
+            fusedUop.retireIdx = nRetiredInSameCycle
             nRetiredInSameCycle += 1
          else:
             break
@@ -954,7 +966,7 @@ class Scheduler:
       self.nextP23Port = '2'
       self.nextP49Port = '4'
       self.nextP78Port = '7'
-      self.uopsDispatchedInPrevCycle = [] # the port usage counter is decreased one cycle after uops are issued
+      self.uopsDispatchedInPrevCycle = [] # the port usage counter is decreased one cycle after uops are dispatched
       self.divBusy = 0
       self.readyQueue = {p:[] for p in uArchConfig.allPorts}
       self.readyDivUops = []
@@ -1258,9 +1270,9 @@ class Scheduler:
          opReadyCycle = max(opReadyCycle, renInpOp.getReadyCycle())
 
       readyCycle = opReadyCycle
-      if opReadyCycle < uop.issued + uArchConfig.issueDispatchDelay:
-         readyCycle = uop.issued + uArchConfig.issueDispatchDelay
-      elif (opReadyCycle == uop.issued + uArchConfig.issueDispatchDelay) or (opReadyCycle == uop.issued + uArchConfig.issueDispatchDelay + 1): # ToDo: is second condition correct on HSW (ex: dec r10; add r11,0x8; test r10,r10)?
+      if opReadyCycle < uop.fusedUop.issued + uArchConfig.issueDispatchDelay:
+         readyCycle = uop.fusedUop.issued + uArchConfig.issueDispatchDelay
+      elif (opReadyCycle == uop.fusedUop.issued + uArchConfig.issueDispatchDelay) or (opReadyCycle == uop.fusedUop.issued + uArchConfig.issueDispatchDelay + 1): # ToDo: is second condition correct on HSW (ex: dec r10; add r11,0x8; test r10,r10)?
          readyCycle = opReadyCycle + 1
 
       return max(clock + 1, readyCycle)
@@ -1706,10 +1718,12 @@ class InstrInstance:
       self.instr = instr
       self.address = address
       self.rnd = rnd
-      self.uops = self.__generateUops()
-      self.regMergeUops = []
-      self.stackSyncUops = []
-      self.predecoded = None
+      self.uops: List[LaminatedUop] = self.__generateUops()
+      self.regMergeUops: List[LaminatedUop] = []
+      self.stackSyncUops: List[LaminatedUop] = []
+      self.source = None # MITE, DSB, or LSD
+      self.predecoded = None # cycle in which the instruction instance was predecoded
+      self.removedFromIQ = None # cycle in which the instruction instance was removed from the IQ
 
    def __generateUops(self):
       if not self.instr.UopPropertiesList:
@@ -1731,7 +1745,8 @@ class InstrInstance:
       nLaminatedDomainUops = min(self.instr.uopsMITE + self.instr.uopsMS, len(fusedDomainUops))
       for i in range(0, nLaminatedDomainUops - 1):
          fusedUop = fusedDomainUops.popleft()
-         if ((len(fusedUop.uops) == 1) and fusedUop.uops[0].prop.possiblePorts and any(p in ['2', '3', '7'] for p in fusedUop.uops[0].prop.possiblePorts)
+         if ((len(fusedUop.getUnfusedUops()) == 1) and fusedUop.getUnfusedUops()[0].prop.possiblePorts
+               and any(p in ['2', '3', '7'] for p in fusedUop.getUnfusedUops()[0].prop.possiblePorts)
                and len(fusedDomainUops) >= nLaminatedDomainUops - i):
             laminatedDomainUops.append(LaminatedUop([fusedUop, fusedDomainUops.popleft()]))
          else:
@@ -1799,7 +1814,7 @@ def getUopsTableColumns(tableLineData):
          c.append(0.0)
       for lamUops in tld.uopsForRnd: # ToDo: Stacksync & RegMergeUops
          for lamUop in lamUops:
-            if lamUop.uopSource is not None:
+            if lamUop.uopSource in ['MITE', 'MS', 'DSB', 'LSD']:
                columns[lamUop.uopSource][-1] += 1
             for fusedUop in lamUop.getFusedUops():
                columns['Issued'][-1] += 1
@@ -1879,7 +1894,7 @@ def printUopsTable(tableLineData, addHyperlink=True):
 
 
 def writeHtmlFile(filename, title, head, body):
-   with open(filename, "w") as f:
+   with open(filename, 'w') as f:
       f.write('<!DOCTYPE html>\n'
               '<html>\n'
               '<head>\n'
@@ -1941,8 +1956,8 @@ def generateHTMLTraceTable(filename, instructions, instrInstances, lastRelevantR
                uopData['actualPort'] = uop.actualPort if uop.actualPort else '-'
                uopData['events'] = {}
 
-               for evCycle, ev in [(preDec, 'P'), (uop.addedToIDQ, 'Q'), (uop.issued, 'I'), (uop.readyForDispatch, 'r'),
-                                   (uop.dispatched, 'D'), (uop.executed, 'E'), (uop.retired, 'R'),
+               for evCycle, ev in [(preDec, 'P'), (uop.fusedUop.laminatedUop.addedToIDQ, 'Q'), (uop.fusedUop.issued, 'I'), (uop.readyForDispatch, 'r'),
+                                   (uop.dispatched, 'D'), (uop.executed, 'E'), (uop.fusedUop.retired, 'R'),
                                    #(max(op.getReadyCycle() for op in uop.renamedInputOperands) if uop.renamedInputOperands else 0, 'i'),
                                    #(max(op.getReadyCycle() for op in uop.renamedOutputOperands) if uop.renamedOutputOperands else None, 'o'),
                                    ]:
@@ -1983,7 +1998,7 @@ def generateHTMLGraph(filename, instructions, instrInstances, maxCycle):
       eventsDict[evtName] = [0 for _ in range(0,maxCycle+1)]
       for instrI in instrInstances:
          for lamUop in instrI.uops:
-            cycle = getattr(lamUop.getUnfusedUops()[0], evtAttrName)
+            cycle = getattr(lamUop, evtAttrName)
             addEvent(evtName, cycle)
 
    for evtName, evtAttrName in [('uops issued', 'issued'), ('uops retired', 'retired')]:
@@ -1991,7 +2006,7 @@ def generateHTMLGraph(filename, instructions, instrInstances, maxCycle):
       for instrI in instrInstances:
          for lamUop in instrI.uops:
             for fusedUop in lamUop.getFusedUops():
-               cycle = getattr(fusedUop.getUnfusedUops()[0], evtAttrName)
+               cycle = getattr(fusedUop, evtAttrName)
                addEvent(evtName, cycle)
 
    for evtName, evtAttrName in [('uops dispatched', 'dispatched'), ('uops executed', 'executed')]:
@@ -2029,6 +2044,89 @@ def generateHTMLGraph(filename, instructions, instrInstances, maxCycle):
    writeHtmlFile(filename, 'Graph', head, body)
 
 
+def generateJSONOutput(filename, instructions: List[Instr], frontEnd: FrontEnd, maxCycle):
+   parameters = {
+      'uArchName': uArchConfig.name,
+      'IQWidth': uArchConfig.IQWidth,
+      'IDQWidth': uArchConfig.IDQWidth,
+      'RBWidth': uArchConfig.RBWidth,
+      'RSWidth': uArchConfig.RSWidth,
+      'allPorts': uArchConfig.allPorts,
+      'nDecoders': uArchConfig.nDecoders,
+      'LSD': (frontEnd.uopSource == 'LSD'),
+      'LSDUnrollCount': frontEnd.LSDUnrollCount,
+      'mode': 'unroll' if frontEnd.unroll else 'loop'
+   }
+
+   instrList = []
+   instrToID = {}
+   for instr in instructions:
+      instrDict = {}
+      instrDict['asm'] = instr.asm
+      instrDict['opcode'] = instr.opcode
+      instrDict['url'] = getURL(instr.instrStr)
+      name = 'instr' + str(len(instrToID.keys()))
+      instrDict['ID'] = name
+      instrToID[instr] = name
+      if instr.macroFusedWithNextInstr:
+         instrDict['macroFusedWithNextInstr'] = True
+      for instrI in frontEnd.allGeneratedInstrInstances:
+         if instrI.instr == instr:
+            instrDict['source'] = instrI.source
+            break
+      instrList.append(instrDict)
+
+   cycles = [{'cycle': i} for i in range(0, maxCycle+1)]
+   for instrI in frontEnd.allGeneratedInstrInstances:
+      instrID = instrToID[instrI.instr]
+      rnd = instrI.rnd
+      if (instrI.predecoded is not None) and (instrI.predecoded <= maxCycle):
+         cycles[instrI.predecoded].setdefault('addedToIQ', []).append([rnd, instrID])
+      if (instrI.removedFromIQ is not None) and (instrI.removedFromIQ <= maxCycle):
+         cycles[instrI.removedFromIQ].setdefault('removedFromIQ', []).append([rnd, instrID])
+
+      lamUopToID = []
+      allFusedUops = []
+      for lamUopI, lamUop in enumerate(instrI.regMergeUops + instrI.stackSyncUops + instrI.uops):
+         if lamUop in instrI.regMergeUops:
+            lamUopID = 'regMergeUop' + str(lamUopI)
+         elif lamUop in instrI.stackSyncUops:
+            lamUopID = 'stackSyncUop' + str(lamUopI)
+         else:
+            lamUopID = 'laminatedDomainUop' + str(lamUopI - len(instrI.stackSyncUops))
+
+         if (lamUop.addedToIDQ is not None) and (lamUop.addedToIDQ <= maxCycle):
+            cycles[lamUop.addedToIDQ].setdefault('addedToIDQ', []).append([lamUop.uopSource, rnd, instrID, lamUopID])
+
+         for fUopI, fUop in enumerate(lamUop.getFusedUops()):
+            fUopID = 'fusedDomainUop' + str(fUopI)
+
+            if (fUop.issued is not None) and (fUop.issued <= maxCycle):
+               if (lamUop.addedToIDQ is not None) and (fUopI == 0):
+                  cycles[fUop.issued].setdefault('removedFromIDQ', []).append([rnd, instrID, lamUopID])
+               cycles[fUop.issued].setdefault('addedToRB', []).append([rnd, instrID, lamUopID, fUopID])
+
+            if (fUop.retired is not None) and (fUop.retired <= maxCycle):
+               cycles[fUop.retired].setdefault('removedFromRB', []).append([rnd, instrID, lamUopID, fUopID])
+
+            for uopI, uop in enumerate(fUop.getUnfusedUops()):
+               uopID = 'unfusedDomainUop' + str(uopI)
+               if (fUop.issued is not None) and (fUop.issued <= maxCycle):
+                  cycles[fUop.issued].setdefault('addedToRS', []).append([rnd, instrID, lamUopID, fUopID, uopID])
+               if (uop.readyForDispatch is not None) and (uop.readyForDispatch <= maxCycle):
+                  cycles[uop.readyForDispatch].setdefault('readyForDispatch', []).append([rnd, instrID, lamUopID, fUopID, uopID])
+               if (uop.dispatched is not None) and (uop.dispatched <= maxCycle):
+                  cycles[uop.dispatched].setdefault('dispatchedPort' + uop.actualPort, []).append([rnd, instrID, lamUopID, fUopID, uopID])
+               if (uop.executed is not None) and (uop.executed <= maxCycle):
+                  cycles[uop.executed].setdefault('executed', []).append([rnd, instrID, lamUopID, fUopID, uopID])
+
+   import json
+   jsonStr = json.dumps({'parameters': parameters, 'instructions': instrList, 'cycles': cycles}, sort_keys=True)
+
+   with open(filename, 'w') as f:
+      f.write(jsonStr)
+
+
 def canonicalizeInstrString(instrString):
    return re.sub('[(){}, ]+', '_', instrString).strip('_')
 
@@ -2051,6 +2149,7 @@ def main():
    parser.add_argument("-noMicroFusion", help="Variant that does not support micro-fusion", action='store_true')
    parser.add_argument("-noMacroFusion", help="Variant that does not support macro-fusion", action='store_true')
    parser.add_argument("-alignmentOffset", help="Alignment offset (relative to a 64-Byte cache line)", type=int, default=0)
+   parser.add_argument("-json", help="JSON output", nargs='?', const='result.json')
    args = parser.parse_args()
 
    if not args.arch in MicroArchConfigs:
@@ -2107,13 +2206,14 @@ def main():
    lastRelevantRound = len(uopsForRound) - 2 # last round may be incomplete, thus -2
    if lastRelevantRound - firstRelevantRound > 10:
       for rnd in range(lastRelevantRound, lastRelevantRound - 5, -1):
-         if uopsForRound[firstRelevantRound][lastApplicableInstr][-1].retireIdx == uopsForRound[rnd][lastApplicableInstr][-1].retireIdx:
+         if uopsForRound[firstRelevantRound][lastApplicableInstr][-1].fusedUop.retireIdx == uopsForRound[rnd][lastApplicableInstr][-1].fusedUop.retireIdx:
             lastRelevantRound = rnd
             break
 
    uopsForRelRound = uopsForRound[firstRelevantRound:(lastRelevantRound+1)]
 
-   TP = float(uopsForRelRound[-1][lastApplicableInstr][-1].retired - uopsForRelRound[0][lastApplicableInstr][-1].retired) / (len(uopsForRelRound)-1)
+   TP = float(uopsForRelRound[-1][lastApplicableInstr][-1].fusedUop.retired
+                 - uopsForRelRound[0][lastApplicableInstr][-1].fusedUop.retired) / (len(uopsForRelRound)-1)
 
    print('TP: {:.2f}'.format(TP))
    print('')
@@ -2150,6 +2250,9 @@ def main():
 
    if args.graph is not None:
       generateHTMLGraph(args.graph, instructions, frontEnd.allGeneratedInstrInstances, clock-1)
+
+   if args.json is not None:
+      generateJSONOutput(args.json, instructions, frontEnd, clock-1)
 
 if __name__ == "__main__":
     main()
