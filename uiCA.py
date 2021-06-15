@@ -2070,9 +2070,9 @@ def generateJSONOutput(filename, instructions: List[Instr], frontEnd: FrontEnd, 
       instrDict['asm'] = instr.asm
       instrDict['opcode'] = instr.opcode
       instrDict['url'] = getURL(instr.instrStr)
-      name = 'instr' + str(len(instrToID.keys()))
-      instrDict['ID'] = name
-      instrToID[instr] = name
+      ID = len(instrToID.keys())
+      instrDict['instrID'] = ID
+      instrToID[instr] = ID
       if instr.macroFusedWithNextInstr:
          instrDict['macroFusedWithNextInstr'] = True
       for instrI in frontEnd.allGeneratedInstrInstances:
@@ -2086,44 +2086,52 @@ def generateJSONOutput(filename, instructions: List[Instr], frontEnd: FrontEnd, 
       instrID = instrToID[instrI.instr]
       rnd = instrI.rnd
       if (instrI.predecoded is not None) and (instrI.predecoded <= maxCycle):
-         cycles[instrI.predecoded].setdefault('addedToIQ', []).append([rnd, instrID])
+         cycles[instrI.predecoded].setdefault('addedToIQ', []).append({'rnd': rnd, 'instr': instrID})
       if (instrI.removedFromIQ is not None) and (instrI.removedFromIQ <= maxCycle):
-         cycles[instrI.removedFromIQ].setdefault('removedFromIQ', []).append([rnd, instrID])
+         cycles[instrI.removedFromIQ].setdefault('removedFromIQ', []).append({'rnd': rnd, 'instrID': instrID})
 
       lamUopToID = []
       allFusedUops = []
       for lamUopI, lamUop in enumerate(instrI.regMergeUops + instrI.stackSyncUops + instrI.uops):
+         baseUopDict = {
+            'rnd': rnd,
+            'instrID': instrID,
+            'lamUopID': lamUopI,
+         }
          if lamUop in instrI.regMergeUops:
-            lamUopID = 'regMergeUop' + str(lamUopI)
-         elif lamUop in instrI.stackSyncUops:
-            lamUopID = 'stackSyncUop' + str(lamUopI)
-         else:
-            lamUopID = 'laminatedDomainUop' + str(lamUopI - len(instrI.stackSyncUops))
+             baseUopDict['regMergeUop'] = True
+         if lamUop in instrI.stackSyncUops:
+             baseUopDict['stackSyncUop'] = True
 
          if (lamUop.addedToIDQ is not None) and (lamUop.addedToIDQ <= maxCycle):
-            cycles[lamUop.addedToIDQ].setdefault('addedToIDQ', []).append([lamUop.uopSource, rnd, instrID, lamUopID])
+            lamUopDict = baseUopDict.copy()
+            lamUopDict['source'] = lamUop.uopSource
+            cycles[lamUop.addedToIDQ].setdefault('addedToIDQ', []).append(lamUopDict)
 
          for fUopI, fUop in enumerate(lamUop.getFusedUops()):
-            fUopID = 'fusedDomainUop' + str(fUopI)
+            fUopDict = baseUopDict.copy()
+            fUopDict['fUopID'] = fUopI
 
             if (fUop.issued is not None) and (fUop.issued <= maxCycle):
                if (lamUop.addedToIDQ is not None) and (fUopI == 0):
-                  cycles[fUop.issued].setdefault('removedFromIDQ', []).append([rnd, instrID, lamUopID])
-               cycles[fUop.issued].setdefault('addedToRB', []).append([rnd, instrID, lamUopID, fUopID])
+                  cycles[fUop.issued].setdefault('removedFromIDQ', []).append(fUopDict)
+               cycles[fUop.issued].setdefault('addedToRB', []).append(fUopDict)
 
             if (fUop.retired is not None) and (fUop.retired <= maxCycle):
-               cycles[fUop.retired].setdefault('removedFromRB', []).append([rnd, instrID, lamUopID, fUopID])
+               cycles[fUop.retired].setdefault('removedFromRB', []).append(fUopDict)
 
             for uopI, uop in enumerate(fUop.getUnfusedUops()):
-               uopID = 'unfusedDomainUop' + str(uopI)
+               unfusedUopDict = fUopDict.copy()
+               unfusedUopDict['uopID'] = uopI
+
                if (fUop.issued is not None) and (fUop.issued <= maxCycle):
-                  cycles[fUop.issued].setdefault('addedToRS', []).append([rnd, instrID, lamUopID, fUopID, uopID])
+                  cycles[fUop.issued].setdefault('addedToRS', []).append(unfusedUopDict)
                if (uop.readyForDispatch is not None) and (uop.readyForDispatch <= maxCycle):
-                  cycles[uop.readyForDispatch].setdefault('readyForDispatch', []).append([rnd, instrID, lamUopID, fUopID, uopID])
+                  cycles[uop.readyForDispatch].setdefault('readyForDispatch', []).append(unfusedUopDict)
                if (uop.dispatched is not None) and (uop.dispatched <= maxCycle):
-                  cycles[uop.dispatched].setdefault('dispatchedPort' + uop.actualPort, []).append([rnd, instrID, lamUopID, fUopID, uopID])
+                  cycles[uop.dispatched].setdefault('dispatched', {})['Port' + uop.actualPort] = unfusedUopDict
                if (uop.executed is not None) and (uop.executed <= maxCycle):
-                  cycles[uop.executed].setdefault('executed', []).append([rnd, instrID, lamUopID, fUopID, uopID])
+                  cycles[uop.executed].setdefault('executed', []).append(unfusedUopDict)
 
    import json
    jsonStr = json.dumps({'parameters': parameters, 'instructions': instrList, 'cycles': cycles}, sort_keys=True)
