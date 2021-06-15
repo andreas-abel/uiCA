@@ -68,12 +68,18 @@ def main():
             for mSuffix, iSuffix in [('', ''), ('_same_reg', '_SR'), ('_indexed', '_I')]:
                for mKey, iKey in [('uops', 'uops'), ('uops_retire_slots', 'retSlots'), ('uops_MITE', 'uopsMITE'), ('uops_MS', 'uopsMS'),
                                   ('div_cycles', 'divC'), ('complex_decoder', 'complDec'), ('available_simple_decoders', 'sDec')]:
-                  if archNode.attrib['name'] == 'HSW' and mKey == 'div_cycles' and mKey+mSuffix in measurementNode.attrib:
-                     mValue = int(float(measurementNode.attrib.get('TP_loop'+mSuffix))) # ToDo: div_cycles ctr. on Haswell seems wrong
+                  if mKey == 'div_cycles' and mKey+mSuffix in measurementNode.attrib:
+                     divCycles = int(measurementNode.attrib.get(mKey+mSuffix))
+                     TP = int(float(measurementNode.attrib.get('TP_unrolled'+mSuffix, divCycles)))
+                     if TP <= divCycles:
+                        perfData[iKey+iSuffix] = TP # on some CPUs, the dividers are partially pipelined
+                     else:
+                        perfData[iKey+iSuffix] = divCycles
+                        perfData['TP'+iSuffix] = TP
                   else:
                      mValue = measurementNode.attrib.get(mKey+mSuffix)
-                  if mValue is not None:
-                     perfData[iKey+iSuffix] = int(mValue)
+                     if mValue is not None:
+                        perfData[iKey+iSuffix] = int(mValue)
                if instrString in ['CPUID', 'MFENCE', 'PAUSE', 'RDTSC'] or XMLInstr.attrib.get('locked', '') == '1':
                   TP_loop = measurementNode.attrib.get('TP_loop'+mSuffix)
                   TP_unrolled = measurementNode.attrib.get('TP_unrolled'+mSuffix)
@@ -83,7 +89,7 @@ def main():
 
                ports = measurementNode.attrib.get('ports'+mSuffix)
                if ports is not None: # ToDo: AMD
-                  if (archNode.attrib['name'] not in ['ICL', 'TGL']) and (XMLInstr.attrib['category'] == 'COND_BR') and (ports == '1*p06'):
+                  if (archNode.attrib['name'] not in ['ICL', 'TGL', 'RKL']) and (XMLInstr.attrib['category'] == 'COND_BR') and (ports == '1*p06'):
                      ports = '1*p6' # taken branches can only use port 6
                   perfData['ports'+iSuffix] = {p.replace('p', ''): int(n) for np in ports.split('+') for n, p in [np.split('*')]}
                elif perfData.get('uops'+iSuffix, -1) == 0:

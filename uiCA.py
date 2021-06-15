@@ -7,7 +7,7 @@ import sys
 from collections import Counter, defaultdict, deque, namedtuple, OrderedDict
 from heapq import heappop, heappush
 from itertools import chain, count
-from typing import List, Set, Dict
+from typing import List, Set, Dict, NamedTuple
 
 import random
 random.seed(0)
@@ -46,8 +46,8 @@ class Uop:
 
    def __init__(self, prop, instrI):
       self.idx = next(self.idx_iter)
-      self.prop = prop # instance of UopProperties
-      self.instrI = instrI # InstructionInstance
+      self.prop: UopProperties = prop
+      self.instrI: InstrInstance = instrI
       self.fusedUop = None # fused-domain uop that contains this
       self.actualPort = None
       self.eliminated = False
@@ -1802,11 +1802,13 @@ def CacheBlocksForNextRoundGenerator(instructions, alignmentOffset):
          prevRnd = curRnd
       cacheBlocks.append(cacheBlock)
 
-TableLineData = namedtuple('TableLineData', ['string', 'url', 'uopsForRnd'])
+TableLineData = NamedTuple('TableLineData', [('string', str), ('url', str), ('uopsForRnd', List[List[LaminatedUop]])])
 
-def getUopsTableColumns(tableLineData):
+def getUopsTableColumns(tableLineData: List[TableLineData]):
    columnKeys = ['MITE', 'MS', 'DSB', 'LSD', 'Issued', 'Exec.']
    columnKeys.extend(('Port ' + p) for p in uArchConfig.allPorts)
+   if any(uop.prop.divCycles for tld in tableLineData for lamUop in tld.uopsForRnd[0] for uop in lamUop.getUnfusedUops()):
+      columnKeys.append('Div')
    columns = OrderedDict([(k, []) for k in columnKeys])
 
    for tld in tableLineData:
@@ -1822,6 +1824,9 @@ def getUopsTableColumns(tableLineData):
                   if uop.actualPort is not None:
                      columns['Exec.'][-1] += 1
                      columns['Port ' + uop.actualPort][-1] += 1
+                  if uop.prop.divCycles:
+                     columns['Div'][-1] += uop.prop.divCycles
+
       for c in columns.values():
          c[-1] = c[-1] / len(tld.uopsForRnd)
 
