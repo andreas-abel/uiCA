@@ -2176,7 +2176,7 @@ def main():
                                   args.noMacroFusion)
    if not instructions:
       print('no instructions found')
-      exit(0)
+      exit(1)
 
    computeUopProperties(instructions)
 
