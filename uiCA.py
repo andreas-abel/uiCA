@@ -2239,6 +2239,7 @@ def main():
    parser.add_argument("-arch", help="Microarchitecture", default='CFL')
    parser.add_argument("-trace", help="HTML trace", nargs='?', const='trace.html')
    parser.add_argument("-graph", help="HTML graph", nargs='?', const='graph.html')
+   parser.add_argument("-TPonly", help="Output only the TP prediction", nargs='?', const='graph.html')
    #parser.add_argument("-loop", help="loop", action='store_true')
    parser.add_argument("-simpleFrontEnd", help="Simulate a simple front end that is only limited by the issue width", action='store_true')
    parser.add_argument("-noMicroFusion", help="Variant that does not support micro-fusion", action='store_true')
@@ -2313,9 +2314,12 @@ def main():
    TP = float(uopsForRelRound[-1][lastApplicableInstr][-1].retired
                  - uopsForRelRound[0][lastApplicableInstr][-1].retired) / (len(uopsForRelRound)-1)
 
+   if args.TPonly:
+      print('{:.2f}'.format(TP))
+      exit(0)
+
    print('TP: {:.2f}'.format(TP))
    print('')
-
    #printPortUsage(instructions, uopsForRelRound)
 
    relevantInstrInstances = []
