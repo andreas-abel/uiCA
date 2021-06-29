@@ -1,4 +1,5 @@
 import copy
+from typing import Dict
 
 class MicroArchConfig:
    def __init__(self, name, XEDName, IQWidth, DSBWidth, IDQWidth, issueWidth, RBWidth, RSWidth, retireWidth, allPorts, pop5CRequiresComplexDecoder,
@@ -39,7 +40,7 @@ class MicroArchConfig:
       self.DSBBlockSize = DSBBlockSize
       self.simplePortAssignment = simplePortAssignment # assign ports with equal probability
 
-MicroArchConfigs = {}
+MicroArchConfigs: Dict[str, MicroArchConfig] = {}
 
 MicroArchConfigs['SKL'] = MicroArchConfig( # https://en.wikichip.org/wiki/intel/microarchitectures/skylake_(client)#Pipeline
    name = 'SKL',

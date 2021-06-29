@@ -48,7 +48,7 @@ class Uop:
       self.idx = next(self.idx_iter)
       self.prop: UopProperties = prop
       self.instrI: InstrInstance = instrI
-      self.fusedUop = None # fused-domain uop that contains this
+      self.fusedUop: FusedUop = None # fused-domain uop that contains this
       self.actualPort = None
       self.eliminated = False
       self.renamedInputOperands = [] # [op[1] for op in inputOperands] # [(instrInputOperand, renamedInpOperand), ...]
@@ -70,7 +70,7 @@ class FusedUop:
       self.__uops = uops
       for uop in uops:
          uop.fusedUop = self
-      self.laminatedUop = None # laminated-domain uop that contains this
+      self.laminatedUop: LaminatedUop = None # laminated-domain uop that contains this
       self.issued = None # cycle in which this uop was issued
       self.retired = None # cycle in which this uop was retired
       self.retireIdx = None # how many other uops were already retired in the same cycle
@@ -445,19 +445,20 @@ class Renamer:
 
 
 class FrontEnd:
-   def __init__(self, instructions, reorderBuffer, scheduler, unroll, alignmentOffset, simpleFrontEnd=False):
+   def __init__(self, instructions, reorderBuffer, scheduler, unroll, alignmentOffset, perfEvents, simpleFrontEnd=False):
       self.IDQ = deque()
       self.renamer = Renamer(self.IDQ, reorderBuffer)
       self.reorderBuffer = reorderBuffer
       self.scheduler = scheduler
       self.unroll = unroll
       self.alignmentOffset = alignmentOffset
+      self.perfEvents = perfEvents
 
       self.MS = MicrocodeSequencer()
 
-      instructionQueue = deque()
-      self.preDecoder = PreDecoder(instructionQueue)
-      self.decoder = Decoder(instructionQueue, self.MS)
+      self.instructionQueue = deque()
+      self.preDecoder = PreDecoder(self.instructionQueue)
+      self.decoder = Decoder(self.instructionQueue, self.MS)
 
       self.RSPOffset = 0
 
@@ -509,7 +510,15 @@ class FrontEnd:
       self.reorderBuffer.cycle(issueUops)
       self.scheduler.cycle(issueUops)
 
+      if self.reorderBuffer.isFull():
+         self.perfEvents.setdefault(clock, {})['RBFull'] = 1
+      if self.scheduler.isFull():
+         self.perfEvents.setdefault(clock, {})['RSFull'] = 1
+      if len(self.instructionQueue) + uArchConfig.preDecodeWidth > uArchConfig.IQWidth:
+         self.perfEvents.setdefault(clock, {})['IQFull'] = 1
+
       if len(self.IDQ) + uArchConfig.DSBWidth > uArchConfig.IDQWidth:
+         self.perfEvents.setdefault(clock, {})['IDQFull'] = 1
          return
 
       if self.uopSource is None:
@@ -1535,7 +1544,7 @@ def getInstructions(filename, rawFile, iacaMarkers, archData, noMicroFusion=Fals
                complexDecoder = perfData.get('complDec_SR', complexDecoder)
                nAvailableSimpleDecoders = perfData.get('sDec_SR', nAvailableSimpleDecoders)
                TP = perfData.get('TP_SR', TP)
-            elif usesIndexedAddr:
+            if usesIndexedAddr:
                uops = perfData.get('uops_I', uops)
                retireSlots = perfData.get('retSlots_I', retireSlots)
                uopsMITE = perfData.get('uopsMITE_I', uopsMITE)
@@ -1898,6 +1907,79 @@ def printUopsTable(tableLineData, addHyperlink=True):
    print(sumLine)
 
 
+def getBottlenecks(TP, perfEvents, instrInstances: List[InstrInstance], nRounds):
+   allLamUops = [lamUop for instrI in instrInstances for lamUop in instrI.uops + instrI.regMergeUops + instrI.stackSyncUops]
+   allFusedUops = [fUop  for lamUop in allLamUops for fUop in lamUop.getFusedUops()]
+   allUnfusedUops = [uop for fUop in allFusedUops for uop in fUop.getUnfusedUops()]
+
+   bottlenecks = []
+
+   # Ports
+   portUsageC = Counter(uop.actualPort for uop in allUnfusedUops if uop.actualPort)
+   for p in sorted(portUsageC):
+      if portUsageC[p] / nRounds >= .99 * TP:
+         bottlenecks.append('Port ' + p)
+
+   # Divider
+   divUsage = sum(uop.prop.divCycles for uop in allUnfusedUops if uop.prop.divCycles)
+   if divUsage / nRounds >= .99 * TP:
+      bottlenecks.append('Divider')
+
+   # Retirement)
+   retireEvents = [fUop.retired for fUop in allFusedUops]
+   nRetireCycles = max(retireEvents) - min(retireEvents) + 1
+   if len(retireEvents) / nRetireCycles >= .99 * uArchConfig.retireWidth:
+      bottlenecks.append('Retirement')
+
+   # Dependencies
+   portsUsedInCycle = {}
+   delayedUopsWithInpDepForPort = {p: [] for p in uArchConfig.allPorts}
+   for uop in allUnfusedUops:
+      if uop.dispatched:
+         portsUsedInCycle.setdefault(uop.dispatched, set()).add(uop.actualPort)
+         if uop.renamedInputOperands and ((uop.readyForDispatch is None) or (uop.fusedUop.issued + uArchConfig.issueDispatchDelay + 1 < uop.readyForDispatch)):
+            delayedUopsWithInpDepForPort[uop.actualPort].append(uop)
+   if portsUsedInCycle:
+      depBottlenecks = 0
+      for cycle in range(min(portsUsedInCycle.keys()), max(portsUsedInCycle.keys())):
+         for port in uArchConfig.allPorts:
+            if port in portsUsedInCycle.get(cycle, set()):
+               continue
+            for uop in delayedUopsWithInpDepForPort[port]:
+               if (uop.fusedUop.issued + uArchConfig.issueDispatchDelay + 1 <= cycle) and ((uop.readyForDispatch is None) or (uop.readyForDispatch > cycle)):
+                  depBottlenecks += 1
+      if depBottlenecks > len(allUnfusedUops):
+         bottlenecks.append('Dependencies')
+
+   if not any((eventsDict.get('RSFull', 0) or eventsDict.get('RBFull', 0)) for eventsDict in perfEvents.values()):
+      # Front End
+      frontEndBottlenecks = []
+      if not any(eventsDict.get('IDQFull', 0) for eventsDict in perfEvents.values()):
+         if all((instrI.predecoded is not None) for instrI in instrInstances):
+            if any(eventsDict.get('IQFull', 0) for eventsDict in perfEvents.values()):
+               frontEndBottlenecks.append('Decoder')
+            else:
+               frontEndBottlenecks.append('Predecoder')
+
+               decodeEvents = [lamUop.addedToIDQ for instrI in instrInstances for lamUop in instrI.uops if (lamUop.addedToIDQ is not None)]
+               nDecodeCycles = max(decodeEvents) - min(decodeEvents) + 1
+               if len(decodeEvents) / nDecodeCycles >= .99 * uArchConfig.nDecoders:
+                  frontEndBottlenecks.append('Decoder')
+
+            issueEvents = [fusedUop.issued for fusedUop in allFusedUops if (fusedUop.issued is not None)]
+            nIssueCycles = max(issueEvents) - min(issueEvents) + 1
+            if len(issueEvents) / nIssueCycles >= .99 * uArchConfig.issueWidth:
+               frontEndBottlenecks.append('Issue')
+      else:
+         frontEndBottlenecks.append('Issue')
+      bottlenecks.append('Front End' + (' (' + ', '.join(frontEndBottlenecks)  + ')' if frontEndBottlenecks else ''))
+   else:
+      if not bottlenecks:
+         bottlenecks.append('Back End')
+
+   return bottlenecks
+
+
 def writeHtmlFile(filename, title, head, body):
    with open(filename, 'w') as f:
       f.write('<!DOCTYPE html>\n'
@@ -2190,8 +2272,10 @@ def main():
    rb = ReorderBuffer(retireQueue)
    scheduler = Scheduler()
 
+   perfEvents: Dict[int, Dict[str, int]] = {}
+
    unroll = (not instructions[-1].isBranchInstr)
-   frontEnd = FrontEnd(instructions, rb, scheduler, unroll, args.alignmentOffset, args.simpleFrontEnd)
+   frontEnd = FrontEnd(instructions, rb, scheduler, unroll, args.alignmentOffset, perfEvents, args.simpleFrontEnd)
 
    #nRounds = 10 + 1000//len(instructions)
    uopsForRound = []
@@ -2207,7 +2291,8 @@ def main():
 
             if rnd >= len(uopsForRound):
                uopsForRound.append({instr: [] for instr in instructions})
-            uopsForRound[rnd][instr].append(uop)
+            uopsForRound[rnd][instr].append(fusedUop)
+            break
 
       if rnd >= 10 and clock > 500:
          break
@@ -2219,28 +2304,30 @@ def main():
    lastRelevantRound = len(uopsForRound) - 2 # last round may be incomplete, thus -2
    if lastRelevantRound - firstRelevantRound > 10:
       for rnd in range(lastRelevantRound, lastRelevantRound - 5, -1):
-         if uopsForRound[firstRelevantRound][lastApplicableInstr][-1].fusedUop.retireIdx == uopsForRound[rnd][lastApplicableInstr][-1].fusedUop.retireIdx:
+         if uopsForRound[firstRelevantRound][lastApplicableInstr][-1].retireIdx == uopsForRound[rnd][lastApplicableInstr][-1].retireIdx:
             lastRelevantRound = rnd
             break
 
    uopsForRelRound = uopsForRound[firstRelevantRound:(lastRelevantRound+1)]
 
-   TP = float(uopsForRelRound[-1][lastApplicableInstr][-1].fusedUop.retired
-                 - uopsForRelRound[0][lastApplicableInstr][-1].fusedUop.retired) / (len(uopsForRelRound)-1)
+   TP = float(uopsForRelRound[-1][lastApplicableInstr][-1].retired
+                 - uopsForRelRound[0][lastApplicableInstr][-1].retired) / (len(uopsForRelRound)-1)
 
    print('TP: {:.2f}'.format(TP))
    print('')
 
    #printPortUsage(instructions, uopsForRelRound)
 
-   instrInstancesForInstr = {instr: [] for instr in instructions}
+   relevantInstrInstances = []
+   relevantInstrInstancesForInstr = {instr: [] for instr in instructions}
    for instrI in frontEnd.allGeneratedInstrInstances:
       if firstRelevantRound <= instrI.rnd <= lastRelevantRound:
-         instrInstancesForInstr[instrI.instr].append(instrI)
+         relevantInstrInstances.append(instrI)
+         relevantInstrInstancesForInstr[instrI.instr].append(instrI)
 
    tableLineData = []
    for instr in instructions:
-      instrInstances = instrInstancesForInstr[instr]
+      instrInstances = relevantInstrInstancesForInstr[instr]
       if any(instrI.regMergeUops for instrI in instrInstances):
          uops = [instrI.regMergeUops for instrI in instrInstances]
          tableLineData.append(TableLineData('<Register Merge Uop>', None, uops))
@@ -2256,6 +2343,10 @@ def main():
 
    printUopsTable(tableLineData)
    print('')
+
+   bottlenecks = getBottlenecks(TP, perfEvents, relevantInstrInstances, lastRelevantRound - firstRelevantRound + 1)
+   if bottlenecks:
+      print('Bottleneck' + ('s' if len(bottlenecks) > 1 else '') + ': ' + ', '.join(sorted(bottlenecks)))
 
    if args.trace is not None:
       #ToDo: use TableLineData instead
