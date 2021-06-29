@@ -2140,6 +2140,7 @@ def generateJSONOutput(filename, instructions: List[Instr], frontEnd: FrontEnd, 
       'RSWidth': uArchConfig.RSWidth,
       'allPorts': uArchConfig.allPorts,
       'nDecoders': uArchConfig.nDecoders,
+      'DSBBlockSize': uArchConfig.DSBBlockSize,
       'LSD': (frontEnd.uopSource == 'LSD'),
       'LSDUnrollCount': frontEnd.LSDUnrollCount,
       'mode': 'unroll' if frontEnd.unroll else 'loop'
