@@ -1851,41 +1851,13 @@ def getUopsTableColumns(tableLineData: List[TableLineData]):
    return columns
 
 
-def printPortUsage(instructions, uopsForRound):
-   formatStr = '|' + '{:^9}|'*(len(uArchConfig.allPorts)+1)
-
-   print('-'*(1+10*(len(uArchConfig.allPorts)+1)))
-   print(formatStr.format('Uops', *uArchConfig.allPorts))
-   print('-'*(1+10*(len(uArchConfig.allPorts)+1)))
-   portUsageC = Counter(uop.actualPort for uopsDict in uopsForRound for uops in uopsDict.values() for uop in uops)
-   portUsageL = [('{:.2f}'.format(float(portUsageC[p])/len(uopsForRound)) if p in portUsageC else '') for p in uArchConfig.allPorts]
-
-   print(formatStr.format(str(sum(instr.uops for instr in instructions if not instr.macroFusedWithPrevInstr)), *portUsageL))
-   print('-'*(1+10*(len(uArchConfig.allPorts)+1)))
-   print()
-
-   print(formatStr.format('Uops', *uArchConfig.allPorts))
-   print('-'*(1+10*(len(uArchConfig.allPorts)+1)))
-   for instr in instructions:
-      uopsForInstr = [uopsDict[instr] for uopsDict in uopsForRound]
-      portUsageC = Counter(uop.actualPort for uops in uopsForInstr for uop in uops)
-      portUsageL = [('{:.2f}'.format(float(portUsageC[p])/len(uopsForRound)) if p in portUsageC else '') for p in uArchConfig.allPorts]
-
-      uopsCol = str(instr.uops)
-      if isinstance(instr, UnknownInstr):
-         uopsCol = 'X'
-      elif instr.macroFusedWithPrevInstr:
-         uopsCol = 'M'
-
-      print(formatStr.format(uopsCol, *portUsageL) + ' ' + instr.asm)
-
-
 def getTableLine(columnWidthList, columns):
    line = '|'
    for w, col in zip(columnWidthList, columns):
       formatStr = '{:^' + str(w) + '}|'
       line += formatStr.format(col)
    return line
+
 
 def formatTableValue(val):
    if isinstance(val, float):
@@ -2331,7 +2303,6 @@ def main():
 
    print('TP: {:.2f}'.format(TP))
    print('')
-   #printPortUsage(instructions, uopsForRelRound)
 
    relevantInstrInstances = []
    relevantInstrInstancesForInstr = {instr: [] for instr in instructions}
@@ -2375,4 +2346,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
