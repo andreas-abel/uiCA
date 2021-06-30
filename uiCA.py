@@ -1811,18 +1811,25 @@ def CacheBlocksForNextRoundGenerator(instructions, alignmentOffset):
          prevRnd = curRnd
       cacheBlocks.append(cacheBlock)
 
-TableLineData = NamedTuple('TableLineData', [('string', str), ('url', str), ('uopsForRnd', List[List[LaminatedUop]])])
+TableLineData = NamedTuple('TableLineData', [('string', str), ('instr', Instr), ('url', str), ('uopsForRnd', List[List[LaminatedUop]])])
 
 def getUopsTableColumns(tableLineData: List[TableLineData]):
    columnKeys = ['MITE', 'MS', 'DSB', 'LSD', 'Issued', 'Exec.']
    columnKeys.extend(('Port ' + p) for p in uArchConfig.allPorts)
    if any(uop.prop.divCycles for tld in tableLineData for lamUop in tld.uopsForRnd[0] for uop in lamUop.getUnfusedUops()):
       columnKeys.append('Div')
+   columnKeys.append('Notes')
    columns = OrderedDict([(k, []) for k in columnKeys])
 
    for tld in tableLineData:
       for c in columns.values():
          c.append(0.0)
+      if isinstance(tld.instr, UnknownInstr):
+         columns['Notes'][-1] = 'X'
+         continue
+      elif tld.instr.macroFusedWithPrevInstr:
+         columns['Notes'][-1] = 'M'
+         continue
       for lamUops in tld.uopsForRnd: # ToDo: Stacksync & RegMergeUops
          for lamUop in lamUops:
             if lamUop.uopSource in ['MITE', 'MS', 'DSB', 'LSD']:
@@ -1839,6 +1846,8 @@ def getUopsTableColumns(tableLineData: List[TableLineData]):
       for c in columns.values():
          c[-1] = c[-1] / len(tld.uopsForRnd)
 
+   if not any(v for v in columns['Notes']):
+      del columns['Notes']
    return columns
 
 
@@ -1879,7 +1888,8 @@ def getTableLine(columnWidthList, columns):
    return line
 
 def formatTableValue(val):
-   val = '{:.2f}'.format(val).rstrip('0').rstrip('.')
+   if isinstance(val, float):
+      val = '{:.2f}'.format(val).rstrip('0').rstrip('.')
    return val if (val != '0') else ''
 
 
@@ -1902,7 +1912,7 @@ def printUopsTable(tableLineData, addHyperlink=True):
       print(line)
 
    print('-' * tableWidth)
-   sumLine = getTableLine(columnWidthList, [formatTableValue(sum(v)) for v in columns.values()])
+   sumLine = getTableLine(columnWidthList, [formatTableValue(sum(v) if k != 'Notes' else '') for k, v in columns.items()])
    sumLine += ' Total'
    print(sumLine)
 
@@ -2335,16 +2345,16 @@ def main():
       instrInstances = relevantInstrInstancesForInstr[instr]
       if any(instrI.regMergeUops for instrI in instrInstances):
          uops = [instrI.regMergeUops for instrI in instrInstances]
-         tableLineData.append(TableLineData('<Register Merge Uop>', None, uops))
+         tableLineData.append(TableLineData('<Register Merge Uop>', None, None, uops))
       if any(instrI.stackSyncUops for instrI in instrInstances):
          uops = [instrI.stackSyncUops for instrI in instrInstances]
-         tableLineData.append(TableLineData('<Stack Sync Uop>', None, uops))
+         tableLineData.append(TableLineData('<Stack Sync Uop>', None, None, uops))
 
       uops = [instrI.uops for instrI in instrInstances]
       url = None
       if not isinstance(instr, UnknownInstr):
          url = getURL(instr.instrStr)
-      tableLineData.append(TableLineData(instr.asm, url, uops))
+      tableLineData.append(TableLineData(instr.asm, instr, url, uops))
 
    printUopsTable(tableLineData)
    print('')
