@@ -2153,7 +2153,7 @@ def generateJSONOutput(filename, instructions: List[Instr], frontEnd: FrontEnd, 
       if (instrI.predecoded is not None) and (instrI.predecoded <= maxCycle):
          cycles[instrI.predecoded].setdefault('addedToIQ', []).append({'rnd': rnd, 'instr': instrID})
       if (instrI.removedFromIQ is not None) and (instrI.removedFromIQ <= maxCycle):
-         cycles[instrI.removedFromIQ].setdefault('removedFromIQ', []).append({'rnd': rnd, 'instrID': instrID})
+         cycles[instrI.removedFromIQ].setdefault('removedFromIQ', []).append({'rnd': rnd, 'instr': instrID})
 
       lamUopToID = []
       allFusedUops = []
