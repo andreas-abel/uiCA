@@ -2034,7 +2034,7 @@ def generateHTMLTraceTable(filename, instructions, instrInstances, lastRelevantR
                      uopData['events'][evCycle] = ev
       prevInstrI = instrI
 
-   with open('traceTemplate.html', 'r') as t:
+   with open(os.path.join(os.path.dirname(os.path.realpath(__file__)), 'traceTemplate.html'), 'r') as t:
       html = t.read()
       html = html.replace('var tableData = {}', 'var tableData = ' + json.dumps(tableDataForRnd))
 
