@@ -2048,7 +2048,7 @@ def generateHTMLGraph(filename, instructions, instrInstances, maxCycle):
 
    head = ''
 
-   fig = go.Figure()
+   fig = go.Figure(layout=go.Layout(height=700))
    fig.update_xaxes(title_text='Cycle')
 
    eventsDict = OrderedDict()
