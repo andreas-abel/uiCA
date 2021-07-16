@@ -1490,8 +1490,13 @@ def computeUopProperties(instructions):
 
 def getInstructions(filename, rawFile, iacaMarkers, archData, noMicroFusion=False, noMacroFusion=False):
    xedBinary = os.path.join(os.path.dirname(os.path.realpath(__file__)), 'xed')
-   output = subprocess.check_output([xedBinary, '-64', '-v', '4', '-isa-set', '-chip-check', uArchConfig.XEDName, ('-ir' if rawFile else '-i'), filename])
-   disas = parseXedOutput(output.decode(), iacaMarkers)
+   output = subprocess.check_output([xedBinary, '-64', '-v', '4', '-isa-set', '-chip-check', uArchConfig.XEDName,
+                                     ('-ir' if rawFile else '-i'), filename]).decode()
+   if 'ERROR: GENERAL_ERROR Could not decode at offset:' in output:
+      print('\n'.join(l for l in output.splitlines() if 'ERROR: GENERAL_ERROR Could not decode at offset:' in l))
+      exit(1)
+
+   disas = parseXedOutput(output, iacaMarkers)
    zmmRegistersInUse = any(('ZMM' in reg) for instrD in disas for reg in instrD.regOperands.values())
 
    instructions = []

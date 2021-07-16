@@ -66,6 +66,10 @@ MicroArchConfigs['SKL'] = MicroArchConfig( # https://en.wikichip.org/wiki/intel/
    DSB_MS_Stall = 2,
 )
 
+MicroArchConfigs['SKX'] = copy.deepcopy(MicroArchConfigs['SKL'])
+MicroArchConfigs['SKX'].name = 'SKX'
+MicroArchConfigs['SKX'].XEDName = 'SKYLAKE_SERVER'
+
 MicroArchConfigs['KBL'] = copy.deepcopy(MicroArchConfigs['SKL'])
 MicroArchConfigs['KBL'].name = 'KBL'
 
