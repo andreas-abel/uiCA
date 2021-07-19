@@ -165,6 +165,9 @@ MicroArchConfigs['TGL'] = copy.deepcopy(MicroArchConfigs['ICL'])
 MicroArchConfigs['TGL'].name = 'TGL'
 MicroArchConfigs['TGL'].XEDName = 'TIGER_LAKE'
 
+MicroArchConfigs['RKL'] = copy.deepcopy(MicroArchConfigs['ICL'])
+MicroArchConfigs['RKL'].name = 'RKL'
+MicroArchConfigs['RKL'].moveEliminationGPRSlots = 'unlimited'
 
 MicroArchConfigs['CLX_SimplePorts'] = copy.deepcopy(MicroArchConfigs['CLX'])
 MicroArchConfigs['CLX_SimplePorts'].simplePortAssignment = True
