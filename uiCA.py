@@ -1831,8 +1831,7 @@ def getUopsTableColumns(tableLineData: List[TableLineData]):
          c.append(0.0)
       if isinstance(tld.instr, UnknownInstr):
          columns['Notes'][-1] = 'X'
-         continue
-      elif tld.instr.macroFusedWithPrevInstr:
+      elif tld.instr and tld.instr.macroFusedWithPrevInstr:
          columns['Notes'][-1] = 'M'
          continue
       for lamUops in tld.uopsForRnd: # ToDo: Stacksync & RegMergeUops
@@ -1848,20 +1847,13 @@ def getUopsTableColumns(tableLineData: List[TableLineData]):
                   if uop.prop.divCycles:
                      columns['Div'][-1] += uop.prop.divCycles
 
-      for c in columns.values():
-         c[-1] = c[-1] / len(tld.uopsForRnd)
+      for k, c in columns.items():
+         if k != 'Notes':
+            c[-1] = c[-1] / len(tld.uopsForRnd)
 
    if not any(v for v in columns['Notes']):
       del columns['Notes']
    return columns
-
-
-def getTableLine(columnWidthList, columns):
-   line = '|'
-   for w, col in zip(columnWidthList, columns):
-      formatStr = '{:^' + str(w) + '}|'
-      line += formatStr.format(col)
-   return line
 
 
 def formatTableValue(val):
@@ -1873,14 +1865,45 @@ def formatTableValue(val):
 def printUopsTable(tableLineData, addHyperlink=True):
    columns = getUopsTableColumns(tableLineData)
 
+   if 'Notes' in columns:
+      if 'M' in columns['Notes']: print('M - Macro-fused with previous instruction')
+      if 'X' in columns['Notes']: print('X - Instruction not supported')
+      print('')
+
    columnWidthList = [2 + max(len(k), max(len(formatTableValue(l)) for l in lines)) for k, lines in columns.items()]
    tableWidth = sum(columnWidthList) + len(columns.keys()) + 1
 
-   print(getTableLine(columnWidthList, columns.keys()))
-   print('-' * tableWidth)
+   def getTableBorderLine(firstC, middleC, lastC):
+      line = ''
+      for h, w in zip(columns.keys(), columnWidthList):
+         if h == 'MITE':
+            line += firstC
+         elif h in ['Issued', 'Exec.', 'Port 0', 'Notes']:
+            line += middleC
+         else:
+            line += u'\u2500'
+         line += u'\u2500' * w
+      line += lastC
+      return line
+
+   def getTableLine(columnValues):
+      line = ''
+      for h, w, val in zip(columns.keys(), columnWidthList, columnValues):
+         if h in ['MITE', 'Issued', 'Exec.', 'Port 0', 'Notes']:
+            line += u'\u2502'
+         else:
+            line += ' '
+         formatStr = '{:^' + str(w) + '}'
+         line += formatStr.format(val)
+      line += u'\u2502'
+      return line
+
+   print(getTableBorderLine(u'\u250c', u'\u252c', u'\u2510'))
+   print(getTableLine(columns.keys()))
+   print(getTableBorderLine(u'\u251c', u'\u253c', u'\u2524'))
 
    for i, tld in enumerate(tableLineData):
-      line = getTableLine(columnWidthList, [formatTableValue(v[i]) for v in columns.values()]) + ' '
+      line = getTableLine([formatTableValue(v[i]) for v in columns.values()]) + ' '
       if addHyperlink and (tld.url is not None):
          # see https://stackoverflow.com/a/46289463/10461973
          line += '\x1b]8;;{}\a{}\x1b]8;;\a'.format(tld.url, tld.string)
@@ -1888,10 +1911,11 @@ def printUopsTable(tableLineData, addHyperlink=True):
          line += tld.string
       print(line)
 
-   print('-' * tableWidth)
-   sumLine = getTableLine(columnWidthList, [formatTableValue(sum(v) if k != 'Notes' else '') for k, v in columns.items()])
+   print(getTableBorderLine(u'\u251c', u'\u253c', u'\u2524'))
+   sumLine = getTableLine([formatTableValue(sum(v) if k != 'Notes' else '') for k, v in columns.items()])
    sumLine += ' Total'
    print(sumLine)
+   print(getTableBorderLine(u'\u2514', u'\u2534', u'\u2518'))
 
 
 def getBottlenecks(TP, perfEvents, instrInstances: List[InstrInstance], nRounds):
@@ -1967,10 +1991,11 @@ def getBottlenecks(TP, perfEvents, instrInstances: List[InstrInstance], nRounds)
    return bottlenecks
 
 
-def writeHtmlFile(filename, title, head, body):
+def writeHtmlFile(filename, title, head, body, includeDOCTYPE=True):
    with open(filename, 'w') as f:
-      f.write('<!DOCTYPE html>\n'
-              '<html>\n'
+      if includeDOCTYPE:
+         f.write('<!DOCTYPE html>\n')
+      f.write('<html>\n'
               '<head>\n'
               '<meta charset="utf-8"/>'
               '<title>' + title + '</title>\n'
@@ -2053,7 +2078,7 @@ def generateHTMLGraph(filename, instructions, instrInstances, maxCycle):
 
    head = ''
 
-   fig = go.Figure(layout=go.Layout(height=700))
+   fig = go.Figure()
    fig.update_xaxes(title_text='Cycle')
 
    eventsDict = OrderedDict()
@@ -2115,7 +2140,7 @@ def generateHTMLGraph(filename, instructions, instrInstances, maxCycle):
    body = body.replace('"iconJS"', 'Plotly.Icons.drawline')
    body = body.replace('"interpolationJS"', 'function (gd) {Plotly.restyle(gd, "line.shape", gd.data[0].line.shape == "hv" ? "linear" : "hv")}')
 
-   writeHtmlFile(filename, 'Graph', head, body)
+   writeHtmlFile(filename, 'Graph', head, body, includeDOCTYPE=False) # if DOCTYPE is included, scaling doesn't work properly
 
 
 def generateJSONOutput(filename, instructions: List[Instr], frontEnd: FrontEnd, maxCycle):
@@ -2306,8 +2331,7 @@ def main():
       print('{:.2f}'.format(TP))
       exit(0)
 
-   print('TP: {:.2f}'.format(TP))
-   print('')
+   print('Throughput: {:.2f}'.format(TP))
 
    relevantInstrInstances = []
    relevantInstrInstancesForInstr = {instr: [] for instr in instructions}
@@ -2332,12 +2356,12 @@ def main():
          url = getURL(instr.instrStr)
       tableLineData.append(TableLineData(instr.asm, instr, url, uops))
 
-   printUopsTable(tableLineData)
-   print('')
-
    bottlenecks = getBottlenecks(TP, perfEvents, relevantInstrInstances, lastRelevantRound - firstRelevantRound + 1)
    if bottlenecks:
       print('Bottleneck' + ('s' if len(bottlenecks) > 1 else '') + ': ' + ', '.join(sorted(bottlenecks)))
+
+   print('')
+   printUopsTable(tableLineData)
 
    if args.trace is not None:
       #ToDo: use TableLineData instead
