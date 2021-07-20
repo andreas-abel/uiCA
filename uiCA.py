@@ -2219,7 +2219,7 @@ def generateJSONOutput(filename, instructions: List[Instr], frontEnd: FrontEnd, 
                unfusedUopDict = fUopDict.copy()
                unfusedUopDict['uopID'] = uopI
 
-               if (fUop.issued is not None) and (fUop.issued <= maxCycle):
+               if (fUop.issued is not None) and (fUop.issued <= maxCycle) and (fUop.issued != uop.executed):
                   cycles[fUop.issued].setdefault('addedToRS', []).append(unfusedUopDict)
                if (uop.readyForDispatch is not None) and (uop.readyForDispatch <= maxCycle):
                   cycles[uop.readyForDispatch].setdefault('readyForDispatch', []).append(unfusedUopDict)
