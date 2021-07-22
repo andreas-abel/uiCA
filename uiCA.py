@@ -338,8 +338,9 @@ class Renamer:
                if not renamedReg in curMultiUseDict:
                   curMultiUseDict[renamedReg] = set()
                curMultiUseDict[renamedReg].update([canonicalInpReg, canonicalOutReg])
-               #ToDo: abstract value?
 
+               key = self.getRenameDictKey(uop.prop.instr.outputRegOperands[0])
+               self.curInstrRndAbstractValueDict[key] = self.computeAbstractValue(uop.prop.instr)
             else:
                if uop.prop.instr.uops or isinstance(uop, StackSyncUop):
                   if uop.prop.isStoreAddressUop:
