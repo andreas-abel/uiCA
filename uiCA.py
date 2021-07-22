@@ -2072,7 +2072,7 @@ def generateHTMLTraceTable(filename, instructions, instrInstances, lastRelevantR
          f.write(html)
 
 
-def generateHTMLGraph(filename, instructions, instrInstances, maxCycle):
+def generateHTMLGraph(filename, instructions, instrInstances: List[InstrInstance], maxCycle):
    from plotly.offline import plot
    import plotly.graph_objects as go
 
@@ -2083,24 +2083,41 @@ def generateHTMLGraph(filename, instructions, instrInstances, maxCycle):
 
    eventsDict = OrderedDict()
 
-   def addEvent(evtName, cycle):
+   def addEvent(evtName, cycle, val=1):
       if (cycle is not None) and (cycle <= maxCycle):
-         eventsDict[evtName][cycle] += 1
+         eventsDict[evtName][cycle] += val
 
-   for evtName, evtAttrName in [('instr. predecoded', 'predecoded')]:
+   for evtName in ['IQ', 'IDQ', 'Scheduler', 'Reorder buffer']:
+      eventsDict[evtName] = [0 for _ in range(0,maxCycle+1)]
+   for instrI in instrInstances:
+      addEvent('IQ', instrI.predecoded)
+      addEvent('IQ', instrI.removedFromIQ, -1)
+      for lamUop in instrI.uops:
+         addEvent('IDQ', lamUop.addedToIDQ)
+         for fI, fusedUop in enumerate(lamUop.getFusedUops()):
+            if (fI == 0) and (lamUop.addedToIDQ is not None):
+               addEvent('IDQ', fusedUop.issued, -1)
+            addEvent('Reorder buffer', fusedUop.issued)
+            addEvent('Reorder buffer', fusedUop.retired, -1)
+            for uop in fusedUop.getUnfusedUops():
+               if fusedUop.issued != uop.executed:
+                  addEvent('Scheduler', fusedUop.issued)
+                  addEvent('Scheduler', uop.dispatched, -1)
+
+   for evtName, evtAttrName in [('Instr. predecoded', 'predecoded')]:
       eventsDict[evtName] = [0 for _ in range(0,maxCycle+1)]
       for instrI in instrInstances:
          cycle = getattr(instrI, evtAttrName)
          addEvent(evtName, cycle)
 
-   for evtName, evtAttrName in [('uops added to IDQ', 'addedToIDQ')]:
+   for evtName, evtAttrName in [('&mu;ops added to IDQ', 'addedToIDQ')]:
       eventsDict[evtName] = [0 for _ in range(0,maxCycle+1)]
       for instrI in instrInstances:
          for lamUop in instrI.uops:
             cycle = getattr(lamUop, evtAttrName)
             addEvent(evtName, cycle)
 
-   for evtName, evtAttrName in [('uops issued', 'issued'), ('uops retired', 'retired')]:
+   for evtName, evtAttrName in [('&mu;ops issued', 'issued'), ('&mu;ops retired', 'retired')]:
       eventsDict[evtName] = [0 for _ in range(0,maxCycle+1)]
       for instrI in instrInstances:
          for lamUop in instrI.uops:
@@ -2108,7 +2125,7 @@ def generateHTMLGraph(filename, instructions, instrInstances, maxCycle):
                cycle = getattr(fusedUop, evtAttrName)
                addEvent(evtName, cycle)
 
-   for evtName, evtAttrName in [('uops dispatched', 'dispatched'), ('uops executed', 'executed')]:
+   for evtName, evtAttrName in [('&mu;ops dispatched', 'dispatched'), ('&mu;ops executed', 'executed')]:
       eventsDict[evtName] = [0 for _ in range(0,maxCycle+1)]
       for instrI in instrInstances:
          for lamUop in instrI.uops:
@@ -2117,12 +2134,12 @@ def generateHTMLGraph(filename, instructions, instrInstances, maxCycle):
                addEvent(evtName, cycle)
 
    for port in uArchConfig.allPorts:
-      eventsDict['uops port ' + port] = [0 for _ in range(0,maxCycle+1)]
+      eventsDict['&mu;ops port ' + port] = [0 for _ in range(0,maxCycle+1)]
    for instrI in instrInstances:
       for lamUop in instrI.uops:
          for uop in lamUop.getUnfusedUops():
             if uop.actualPort is not None:
-               evtName = 'uops port ' + uop.actualPort
+               evtName = '&mu;ops port ' + uop.actualPort
                cycle = uop.dispatched
                addEvent(evtName, cycle)
 
@@ -2246,19 +2263,18 @@ def getURL(instrStr):
 # With the -iacaMarkers option, only the parts of the code that are between the IACA markers are considered.
 def main():
    parser = argparse.ArgumentParser(description='Disassembler')
-   parser.add_argument('filename', help="File to be disassembled")
-   parser.add_argument("-iacaMarkers", help="Use IACA markers", action='store_true')
-   parser.add_argument("-raw", help="raw file", action='store_true')
-   parser.add_argument("-arch", help="Microarchitecture", default='CFL')
-   parser.add_argument("-trace", help="HTML trace", nargs='?', const='trace.html')
-   parser.add_argument("-graph", help="HTML graph", nargs='?', const='graph.html')
-   parser.add_argument("-TPonly", help="Output only the TP prediction", nargs='?', const='graph.html')
-   #parser.add_argument("-loop", help="loop", action='store_true')
-   parser.add_argument("-simpleFrontEnd", help="Simulate a simple front end that is only limited by the issue width", action='store_true')
-   parser.add_argument("-noMicroFusion", help="Variant that does not support micro-fusion", action='store_true')
-   parser.add_argument("-noMacroFusion", help="Variant that does not support macro-fusion", action='store_true')
-   parser.add_argument("-alignmentOffset", help="Alignment offset (relative to a 64-Byte cache line)", type=int, default=0)
-   parser.add_argument("-json", help="JSON output", nargs='?', const='result.json')
+   parser.add_argument('filename', help='File to be disassembled')
+   parser.add_argument('-iacaMarkers', help='Use IACA markers', action='store_true')
+   parser.add_argument('-raw', help='raw file', action='store_true')
+   parser.add_argument('-arch', help='Microarchitecture', default='CFL')
+   parser.add_argument('-trace', help='HTML trace', nargs='?', const='trace.html')
+   parser.add_argument('-graph', help='HTML graph', nargs='?', const='graph.html')
+   parser.add_argument('-TPonly', help='Output only the TP prediction', nargs='?', const='graph.html')
+   parser.add_argument('-simpleFrontEnd', help='Simulate a simple front end that is only limited by the issue width', action='store_true')
+   parser.add_argument('-noMicroFusion', help='Variant that does not support micro-fusion', action='store_true')
+   parser.add_argument('-noMacroFusion', help='Variant that does not support macro-fusion', action='store_true')
+   parser.add_argument('-alignmentOffset', help='Alignment offset (relative to a 64-Byte cache line)', type=int, default=0)
+   parser.add_argument('-json', help='JSON output', nargs='?', const='result.json')
    args = parser.parse_args()
 
    if not args.arch in MicroArchConfigs:
