@@ -217,10 +217,13 @@ class RenamedOperand:
       return self.__ready
 
 
+AbstractValue = namedtuple('AbstractValue', ['base', 'offset'])
+
 class Renamer:
-   def __init__(self, IDQ, reorderBuffer):
+   def __init__(self, IDQ, reorderBuffer, initPolicy):
       self.IDQ = IDQ
       self.reorderBuffer = reorderBuffer
+      self.initPolicy = initPolicy
 
       self.renameDict = {}
 
@@ -228,9 +231,12 @@ class Renamer:
       self.curInstrRndRenameDict = {}
       self.curInstrPseudoOpDict = {}
 
-      self.initValue = 0
-      self.abstractValueGenerator = count(1)
-      self.abstractValueDict = {'RSP': next(self.abstractValueGenerator), 'RBP': next(self.abstractValueGenerator)}
+      self.abstractValueBaseGenerator = count(0)
+      self.initValue = self.generateFreshAbstractValue()
+      self.abstractValueDict = {}
+      if initPolicy == 'stack':
+         self.abstractValueDict['RSP'] = self.generateFreshAbstractValue()
+         self.abstractValueDict['RBP'] = self.generateFreshAbstractValue()
       self.curInstrRndAbstractValueDict = {}
 
       self.nGPRMoveElimInCycle = {}
@@ -364,7 +370,8 @@ class Renamer:
                      else:
                         key = self.getRenameDictKey(outOp)
                         self.curInstrRndRenameDict[key] = renOp
-                        self.curInstrRndAbstractValueDict[key] = self.computeAbstractValue(outOp, uop.prop.instr)
+                        if isinstance(outOp, RegOperand):
+                           self.curInstrRndAbstractValueDict[key] = self.computeAbstractValue(uop.prop.instr)
                else:
                   # e.g., xor rax, rax
                   for op in uop.prop.instr.outputRegOperands:
@@ -404,50 +411,56 @@ class Renamer:
 
       return renamerUops
 
-   def getRenameDictKey(self, op, agen=False):
+   def getRenameDictKey(self, op):
       if isinstance(op, RegOperand):
          return getCanonicalReg(op.reg)
       elif isinstance(op, FlagOperand):
          return op.flags
       else:
          return None
-         #memAddr = op.memAddr
-         #return (self.abstractValueDict.get(memAddr.base, self.initValue), self.abstractValueDict.get(memAddr.index, self.initValue), memAddr.scale,
-         #        memAddr.displacement, agen)
 
    def getStoreBufferKey(self, memAddr):
       if memAddr is None:
          return None
-      return (self.abstractValueDict.get(memAddr.base, self.initValue), self.abstractValueDict.get(memAddr.index, self.initValue), memAddr.scale,
-              memAddr.displacement)
+      return (self.getAbstractValueForReg(memAddr.base), self.getAbstractValueForReg(memAddr.index), memAddr.scale, memAddr.displacement)
 
-   def getAbstractValue(self, op, agen=False):
-      key = self.getRenameDictKey(op, agen)
+   def generateFreshAbstractValue(self):
+      return AbstractValue(next(self.abstractValueBaseGenerator), 0)
+
+   def getAbstractValueForReg(self, reg):
+      if reg is None:
+         return None
+      key = getCanonicalReg(reg)
       if not key in self.abstractValueDict:
-         if not agen:
-            self.abstractValueDict[key] = self.initValue
+         if self.initPolicy == 'diff':
+            self.abstractValueDict[key] = self.generateFreshAbstractValue()
          else:
-            self.abstractValueDict[key] = next(self.abstractValueGenerator)
+            self.abstractValueDict[key] = self.initValue
       return self.abstractValueDict[key]
 
-   def computeAbstractValue(self, outOp, instr):
-      if 'MOV' in instr.instrStr and not 'CMOV' in instr.instrStr:
-         if instr.inputRegOperands:
-            return self.getAbstractValue(instr.inputRegOperands[0])
+   def computeAbstractValue(self, instr: Instr):
+      if instr.inputRegOperands:
+         absVal = self.getAbstractValueForReg(instr.inputRegOperands[0].reg)
+         if 'MOV' in instr.instrStr and not 'CMOV' in instr.instrStr:
+            return absVal
+         elif ('ADD' in instr.instrStr) and (instr.immediate is not None):
+            return AbstractValue(absVal.base, absVal.offset + instr.immediate)
+         elif ('SUB' in instr.instrStr) and (instr.immediate is not None):
+            return AbstractValue(absVal.base, absVal.offset - instr.immediate)
+         elif ('INC' in instr.instrStr):
+            return AbstractValue(absVal.base, absVal.offset + 1)
+         elif ('DEC' in instr.instrStr):
+            return AbstractValue(absVal.base, absVal.offset - 1)
          else:
-            return next(self.abstractValueGenerator)
-      #elif instr.instrStr in ['POP (R16)', 'POP (R64)', 'POP (M16)', 'POP (M64)']:
-      #   return self.getAbstractValue(instr.inputMemOperands[0])
-      #elif instr.instrStr.startswith('LEA_'):
-      #   return self.getAbstractValue(instr.agenOperands[0], agen=True)
+            return self.generateFreshAbstractValue()
       else:
-         return next(self.abstractValueGenerator)
+         return self.generateFreshAbstractValue()
 
 
 class FrontEnd:
-   def __init__(self, instructions, reorderBuffer, scheduler, unroll, alignmentOffset, perfEvents, simpleFrontEnd=False):
+   def __init__(self, instructions, reorderBuffer, scheduler, unroll, alignmentOffset, initPolicy, perfEvents, simpleFrontEnd=False):
       self.IDQ = deque()
-      self.renamer = Renamer(self.IDQ, reorderBuffer)
+      self.renamer = Renamer(self.IDQ, reorderBuffer, initPolicy)
       self.reorderBuffer = reorderBuffer
       self.scheduler = scheduler
       self.unroll = unroll
@@ -2275,10 +2288,18 @@ def main():
    parser.add_argument('-noMacroFusion', help='Variant that does not support macro-fusion', action='store_true')
    parser.add_argument('-alignmentOffset', help='Alignment offset (relative to a 64-Byte cache line)', type=int, default=0)
    parser.add_argument('-json', help='JSON output', nargs='?', const='result.json')
+   parser.add_argument('-initPolicy', help='Initial register state; '
+                                           'options: "diff" (all registers initially have different values), '
+                                           '"same" (they all have the same value), '
+                                           '"stack" (they all have the same value, except for the stack and base pointers); '
+                                           'default: "diff"', default='diff')
    args = parser.parse_args()
 
    if not args.arch in MicroArchConfigs:
       print('Unsupported microarchitecture')
+      exit(1)
+   if not args.initPolicy in ['diff', 'same', 'stack']:
+      print('Unsupported -initPolicy')
       exit(1)
 
    global uArchConfig
@@ -2305,7 +2326,7 @@ def main():
    perfEvents: Dict[int, Dict[str, int]] = {}
 
    unroll = (not instructions[-1].isBranchInstr)
-   frontEnd = FrontEnd(instructions, rb, scheduler, unroll, args.alignmentOffset, perfEvents, args.simpleFrontEnd)
+   frontEnd = FrontEnd(instructions, rb, scheduler, unroll, args.alignmentOffset, args.initPolicy, perfEvents, args.simpleFrontEnd)
 
    #nRounds = 10 + 1000//len(instructions)
    uopsForRound = []
