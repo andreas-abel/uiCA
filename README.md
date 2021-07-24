@@ -1,6 +1,13 @@
 # uiCA (uops.info Code Analyzer)
 
-## Installation (Linux)
+## Installation (Ubuntu)
+
+Prerequisites:
+
+    sudo apt-get install -y python3 python3-pip
+    pip3 install plotly
+
+Installation:
 
     git clone ...
     cd uiCA
