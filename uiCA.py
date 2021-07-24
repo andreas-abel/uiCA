@@ -3,20 +3,18 @@
 import importlib
 import os
 import re
-import sys
-from collections import Counter, defaultdict, deque, namedtuple, OrderedDict
+from collections import Counter, deque, namedtuple, OrderedDict
 from heapq import heappop, heappush
-from itertools import chain, count
+from itertools import count
 from typing import List, Set, Dict, NamedTuple
 
 import random
 random.seed(0)
 
+from disas import *
 from x64_lib import *
 from microArchConfigs import MicroArchConfigs
 
-sys.path.append(os.path.join(os.path.dirname(os.path.realpath(__file__)), 'XED-to-XML'))
-from disas import *
 
 clock = 0
 uArchConfig = None

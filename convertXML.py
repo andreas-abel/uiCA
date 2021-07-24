@@ -6,7 +6,6 @@ import sys
 import xml.etree.ElementTree as ET
 from collections import defaultdict
 
-sys.path.append(os.path.join(os.path.dirname(os.path.realpath(__file__)), 'XED-to-XML'))
 from disas import allXmlAttributes
 
 def main():
