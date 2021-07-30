@@ -46,7 +46,7 @@ class Uop:
       self.idx = next(self.idx_iter)
       self.prop: UopProperties = prop
       self.instrI: InstrInstance = instrI
-      self.fusedUop: FusedUop = None # fused-domain uop that contains this
+      self.fusedUop: FusedUop = None # fused-domain uop that contains this uop
       self.actualPort = None
       self.eliminated = False
       self.renamedInputOperands = [] # [op[1] for op in inputOperands] # [(instrInputOperand, renamedInpOperand), ...]
@@ -259,8 +259,6 @@ class Renamer:
       while self.IDQ:
          lamUop = self.IDQ[0]
 
-         #if (lamUop.getUnfusedUops()[0].idx == 0) and (len(self.IDQ) < uArchConfig.IDQWidth / 2):
-         #   break
          firstUnfusedUop = lamUop.getUnfusedUops()[0]
          regMergeProps = firstUnfusedUop.prop.instr.regMergeUopPropertiesList
          if firstUnfusedUop.prop.isFirstUopOfInstr and regMergeProps:
@@ -609,8 +607,6 @@ class FrontEnd:
          return False
 
       if not uArchConfig.branchCanBeLastInstrInCachedBlock:
-         # on SKL, if the next instr. after a branch starts in a new block, the current block cannot be cached
-         # ToDo: other microarchitectures
          lastInstrI = block[-1]
          if lastInstrI.instr.macroFusedWithNextInstr or (lastInstrI.instr.isBranchInstr and (lastInstrI.address%32) + (len(lastInstrI.instr.opcode)//2) >= 32):
             return False
@@ -756,7 +752,6 @@ class DSB:
       retList = []
       secondDSBBlockLoaded = False
       for _ in range(0, uArchConfig.DSBWidth):
-         #print(DSBBlock)
          if not DSBBlock:
             if (not secondDSBBlockLoaded) and self.DSBBlockQueue:
                secondDSBBlockLoaded = True
@@ -861,8 +856,6 @@ class Decoder:
                break
             if (len(self.instructionQueue) <= 1) or (self.instructionQueue[1].predecoded + uArchConfig.predecodeDecodeDelay > clock):
                break
-         #if instrI.instr.macroFusibleWith and ():
-         #   break
          self.instructionQueue.popleft()
          instrI.removedFromIQ = clock
 
@@ -1000,7 +993,6 @@ class Scheduler:
       self.loadUopsSinceLastLoadFence = []
       self.blockedResources = dict() # for how many remaining cycle a resource will be blocked
       self.dependentUops = dict() # uops that have an operand that is written by a non-executed uop
-      #self.loadUopsDependingOnStoreDataUop = dict() # load uops that have been dispatched, but wait on the data to become available
 
    def isFull(self):
       return len(self.uops) + uArchConfig.issueWidth > uArchConfig.RSWidth
@@ -1047,25 +1039,11 @@ class Scheduler:
 
          uop = heappop(queue)[1]
 
-         #uop.actualPort = port
          uop.dispatched = clock
-         #uop.executed = clock + 2
          self.divBusy += uop.prop.divCycles
          self.uops.remove(uop)
          uopsDispatched.append(uop)
-
-         #addToPendingUops = True
-         #if uop.prop.isLoadUop and (uop.storeBufferEntry is not None):
-         #   for stUop in uop.storeBufferEntry.uops:
-         #      if stUop.prop.isStoreDataUop and (stUop.dispatched is None):
-         #         self.loadUopsDependingOnStoreDataUop.setdefault(stUop, []).append(uop)
-         #         addToPendingUops = False
-         #         break
-         #if addToPendingUops:
          self.pendingUops.add(uop)
-
-         #for depUop in self.loadUopsDependingOnStoreDataUop.pop(uop, []):
-         #   self.pendingUops.add(depUop)
 
       for uop in self.uopsDispatchedInPrevCycle:
          self.portUsage[uop.actualPort] -= 1
@@ -1202,7 +1180,7 @@ class Scheduler:
                   port = sortedPorts[1]
                else:
                   port = sortedPorts[nPC % len(sortedPorts)]
-            elif len(uArchConfig.allPorts) == 8: # or len(uArchConfig.allPorts) == 10:
+            elif len(uArchConfig.allPorts) == 8:
                applicablePortUsages = [(p,u) for p, u in self.portUsageAtStartOfCycle[clock].items() if p in uop.prop.possiblePorts]
                minPort, minPortUsage = min(applicablePortUsages, key=lambda x: (x[1], -int(x[0]))) # port with minimum usage so far
 
@@ -1246,17 +1224,6 @@ class Scheduler:
             self.uops.add(uop)
 
             self.checkDependingUopsExecuted(uop)
-            #allDepUopsDispatched = True
-            #for renInpOp in uop.renamedInputOperands:
-            #   if renInpOp.uop and (renInpOp.uop.dispatched is None):
-            #      self.dependentUops.setdefault(renInpOp.uop, []).append(uop)
-            #      allDepUopsDispatched = False
-            #   for uop2 in renInpOp.uops:
-            #      if uop2.dispatched is None:
-            #         self.dependentUops.setdefault(uop2, set()).add(uop)
-
-            #if allDepUopsDispatched:
-            #   self.nonReadyUops.append(uop)
 
             if uop.prop.isFirstUopOfInstr:
                if uop.prop.instr.isStoreSerializing:
@@ -1272,20 +1239,11 @@ class Scheduler:
          if (renInpOp.getReadyCycle() is None) and renInpOp.uop and (renInpOp.uop.executed is None):
             self.dependentUops.setdefault(renInpOp.uop, []).append(uop)
             return
-      #if uop.prop.isLoadUop and (uop.storeBufferEntry is not None):
-      #   for stUop in uop.storeBufferEntry.uops:
-      #      if stUop.dispatched is None:
-      #         self.dependentUops.setdefault(stUop, []).append(uop)
-      #         return
       self.nonReadyUops.append(uop)
 
    def getReadyForDispatchCycle(self, uop):
       opReadyCycle = -1
       for renInpOp in uop.renamedInputOperands:
-         # ToDo
-         #if uop.prop.isLoadUop and isinstance(renInpOp.nonRenamedOperand, MemOperand):
-         #   # load uops can issue as soon as the address registers are ready, before the actual memory is ready
-         #   continue
          if renInpOp.getReadyCycle() is None:
             return None
          opReadyCycle = max(opReadyCycle, renInpOp.getReadyCycle())
@@ -1385,7 +1343,7 @@ def computeUopProperties(instructions):
       storePseudoOps = []
 
       for i, pc in enumerate(loadPcs):
-         inputOperands = instr.memAddrOperands # + instr.inputMemOperands
+         inputOperands = instr.memAddrOperands
          if len(nonMemPcs) > 0:
             outOp = PseudoOperand()
             outputOperands = [outOp]
@@ -1466,14 +1424,6 @@ def computeUopProperties(instructions):
                   baseUopLatencies[outOp] = max(adjustedLatencies.get((inOp, outOp), 1) for inOp in minLatClass)
                else:
                   baseUopLatencies[outOp] = 1
-
-
-            '''
-            divCycles = 0
-            if instr.divCycles and not divCyclesAdded and pc == ['0']:
-               divCycles = instr.divCycles
-               divCyclesAdded = True
-            '''
 
             baseUopProp = UopProperties(instr, nonMemPcs[0], minLatClass, nonMemOutputOperands, baseUopLatencies, instr.divCycles)
             nonMemUopProps.append(baseUopProp)
@@ -1581,7 +1531,6 @@ def getInstructions(filename, rawFile, iacaMarkers, archData, noMicroFusion=Fals
             instrOutputRegOperands = [(n, r) for n, r in instrD.regOperands.items() if (not 'IP' in r) and (not 'STACK' in r) and (not 'RFLAGS' in r)
                                                                                           and ('W' in instrD.rw[n])]
             instrOutputMemOperands = [(n, m) for n, m in instrD.memOperands.items() if 'W' in instrD.rw[n]]
-            #instrOutputOperandNames = [n for n, _ in instrOutputRegOperands+instrOutputMemOperands]
 
             instrFlagOperands = [n for n, r in instrD.regOperands.items() if r == 'RFLAGS']
             instrFlagOperand = instrFlagOperands[0] if instrFlagOperands else None
@@ -1708,8 +1657,6 @@ def getInstructions(filename, rawFile, iacaMarkers, archData, noMicroFusion=Fals
                                 memAddrOperands, agenOperands, latencies, TP, immediate, lcpStall, implicitRSPChange, mayBeEliminated, complexDecoder,
                                 nAvailableSimpleDecoders, hasLockPrefix, isBranchInstr, isSerializingInstr, isLoadSerializing, isStoreSerializing,
                                 macroFusibleWith)
-
-            #print(instruction)
             break
 
       if instruction is None:
@@ -1846,7 +1793,7 @@ def getUopsTableColumns(tableLineData: List[TableLineData]):
       elif tld.instr and tld.instr.macroFusedWithPrevInstr:
          columns['Notes'][-1] = 'M'
          continue
-      for lamUops in tld.uopsForRnd: # ToDo: Stacksync & RegMergeUops
+      for lamUops in tld.uopsForRnd:
          for lamUop in lamUops:
             if lamUop.uopSource in ['MITE', 'MS', 'DSB', 'LSD']:
                columns[lamUop.uopSource][-1] += 1
@@ -2214,8 +2161,6 @@ def generateJSONOutput(filename, instructions: List[Instr], frontEnd: FrontEnd, 
       if (instrI.removedFromIQ is not None) and (instrI.removedFromIQ <= maxCycle):
          cycles[instrI.removedFromIQ].setdefault('removedFromIQ', []).append({'rnd': rnd, 'instr': instrID})
 
-      lamUopToID = []
-      allFusedUops = []
       for lamUopI, lamUop in enumerate(instrI.regMergeUops + instrI.stackSyncUops + instrI.uops):
          baseUopDict = {
             'rnd': rnd,
@@ -2278,7 +2223,7 @@ def main():
    parser.add_argument('filename', help='File to be disassembled')
    parser.add_argument('-iacaMarkers', help='Use IACA markers', action='store_true')
    parser.add_argument('-raw', help='raw file', action='store_true')
-   parser.add_argument('-arch', help='Microarchitecture', default='CFL')
+   parser.add_argument('-arch', help='Microarchitecture', default='SKL')
    parser.add_argument('-trace', help='HTML trace', nargs='?', const='trace.html')
    parser.add_argument('-graph', help='HTML graph', nargs='?', const='graph.html')
    parser.add_argument('-TPonly', help='Output only the TP prediction', nargs='?', const='graph.html')
@@ -2311,9 +2256,7 @@ def main():
       exit(1)
 
    computeUopProperties(instructions)
-
    adjustLatenciesAndAddMergeUops(instructions)
-   #print(instructions)
 
    global clock
    clock = 0
@@ -2327,7 +2270,6 @@ def main():
    unroll = (not instructions[-1].isBranchInstr)
    frontEnd = FrontEnd(instructions, rb, scheduler, unroll, args.alignmentOffset, args.initPolicy, perfEvents, args.simpleFrontEnd)
 
-   #nRounds = 10 + 1000//len(instructions)
    uopsForRound = []
    rnd = 0
    while True:

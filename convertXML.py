@@ -2,7 +2,6 @@
 
 import argparse
 import os
-import sys
 import xml.etree.ElementTree as ET
 from collections import defaultdict
 
@@ -22,7 +21,6 @@ def main():
    for XMLInstr in root.iter('instruction'):
       iform = XMLInstr.attrib['iform']
       instrString = XMLInstr.attrib['string']
-      category = XMLInstr.attrib['category']
       attr = {a.upper(): XMLInstr.attrib[a] for a in allXmlAttributes if a in XMLInstr.attrib}
       opIdxToName = {o.attrib['idx']:o.attrib['name'] for o in XMLInstr.iter('operand') if 'name' in o.attrib}
 
@@ -32,7 +30,6 @@ def main():
       if flagNode is not None:
          for flag in ['A', 'C', 'O', 'P', 'S', 'Z']:
             rw = flagNode.attrib.get('flag_' + flag + 'F', '')
-            hasImmNode = (XMLInstr.find('./operand[@type="imm"]') is not None)
             if ('r' in rw) or ('cw' in rw):
                readFlags.add(flag)
             if 'w' in rw:
@@ -94,13 +91,6 @@ def main():
                elif perfData.get('uops'+iSuffix, -1) == 0:
                   perfData['ports'+iSuffix] = {}
 
-
-
-
-            #divCycles = measurementNode.attrib.get('div_cycles')
-            #if divCycles is not None:
-            #   instrData['divCycles'] = int(divCycles)
-
             macroFusible = measurementNode.attrib.get('macro_fusible')
             if macroFusible is not None:
                instrData['macroFusible'] = set(macroFusible.split(';'))
@@ -137,7 +127,6 @@ def main():
                curPerfDataForArch.append(perfData)
             instrData['perfData'] = curPerfDataForArchIdxDict[perfRepr]
 
-
    path = 'instrData'
 
    try:
@@ -149,7 +138,6 @@ def main():
    open(os.path.join(path, '__init__.py'), 'a').close()
 
    for arch in instrDataForArch.keys():
-      #print len(list(x[0]['perf'] for _, x in instrData.items()))
       with open(os.path.join(path, arch + '.py'), 'w') as f:
          f.write('instrData = ' + repr(instrDataForArch[arch]) + '\n')
          f.write('perfData = ' + repr(perfDataForArch[arch]) + '\n')
@@ -158,4 +146,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-

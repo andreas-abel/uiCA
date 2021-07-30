@@ -28,7 +28,7 @@ Installation:
 
 ## Example Usage
 
-	echo ".intel_syntax noprefix; add rax, rbx; add rbx, rax" > test.asm
+	echo ".intel_syntax noprefix; l: add rax, rbx; add rbx, rax; dec r15; jnz l" > test.asm
     as test.asm -o test.o
     ./uiCA.py test.o -arch SKL
 
