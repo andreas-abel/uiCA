@@ -1,17 +1,126 @@
 import re
 from collections import namedtuple
+from enum import Enum
+from typing import Set
 
-GPRegs = {'AH', 'AL', 'AX', 'BH', 'BL', 'BP', 'BPL', 'BX', 'CH', 'CL', 'CX', 'DH', 'DI', 'DIL', 'DL', 'DX', 'EAX',
-   'EBP', 'EBX', 'ECX', 'EDI', 'EDX', 'ESI', 'ESP', 'R10', 'R10B', 'R10D', 'R10W', 'R11', 'R11B', 'R11D', 'R11W', 'R12',
-   'R12B', 'R12D', 'R12W', 'R13', 'R13B', 'R13D', 'R13W', 'R14', 'R14B', 'R14D', 'R14W', 'R15', 'R15B', 'R15D', 'R15W',
-   'R8', 'R8B', 'R8D', 'R8W', 'R9', 'R9B', 'R9D', 'R9W', 'RAX', 'RBP', 'RBX', 'RCX', 'RDI', 'RDX', 'RSI', 'RSP', 'SI',
-   'SIL', 'SP', 'SPL'}
+class RegEnum(Enum):
 
-High8Regs = {'AH', 'BH', 'CH', 'DH'}
-Low8Regs = {'AL', 'BL', 'BPL', 'CL', 'DIL', 'DL', 'R10B', 'R11B', 'R12B', 'R13B', 'R14B', 'R15B', 'R8B', 'R9B', 'SIL', 'SPL'}
+    @classmethod
+    def all(cls) -> Set[str]:
+        return {c.value for c in cls}
+class GPRegs(RegEnum):
+    AH = "AH"
+    AL = "AL"
+    AX = "AX"
+    BH = "BH"
+    BL = "BL"
+    BP = "BP"
+    BPL = "BPL"
+    BX = "BX"
+    CH = "CH"
+    CL = "CL"
+    CX = "CX"
+    DH = "DH"
+    DI = "DI"
+    DIL = "DIL"
+    DL = "DL"
+    DX = "DX"
+    EAX = "EAX"
+    EBP = "EBP"
+    EBX = "EBX"
+    ECX = "ECX"
+    EDI = "EDI"
+    EDX = "EDX"
+    ESI = "ESI"
+    ESP = "ESP"
+    R10 = "R10"
+    R10B = "R10B"
+    R10D = "R10D"
+    R10W = "R10W"
+    R11 = "R11"
+    R11B = "R11B"
+    R11D = "R11D"
+    R11W = "R11W"
+    R12 = "R12"
+    R12B = "R12B"
+    R12D = "R12D"
+    R12W = "R12W"
+    R13 = "R13"
+    R13B = "R13B"
+    R13D = "R13D"
+    R13W = "R13W"
+    R14 = "R14"
+    R14B = "R14B"
+    R14D = "R14D"
+    R14W = "R14W"
+    R15 = "R15"
+    R15B = "R15B"
+    R15D = "R15D"
+    R15W = "R15W"
+    R8 = "R8"
+    R8B = "R8B"
+    R8D = "R8D"
+    R8W = "R8W"
+    R9 = "R9"
+    R9B = "R9B"
+    R9D = "R9D"
+    R9W = "R9W"
+    RAX = "RAX"
+    RBP = "RBP"
+    RBX = "RBX"
+    RCX = "RCX"
+    RDI = "RDI"
+    RDX = "RDX"
+    RSI = "RSI"
+    RSP = "RSP"
+    SI = "SI"
+    SIL = "SIL"
+    SP = "SP"
+    SPL = "SPL"
 
-STATUSFLAGS = {'CF', 'PF', 'AF', 'ZF', 'SF', 'OF'}
-STATUSFLAGS_noAF = {'CF', 'PF', 'ZF', 'SF', 'OF'}
+
+class High8Regs(RegEnum):
+    AH = "AH"
+    BH = "BH"
+    CH = "CH"
+    DH = "DH"
+
+
+class Low8Regs(RegEnum):
+    AL = "AL"
+    BL = "BL"
+    BPL = "BPL"
+    CL = "CL"
+    DIL = "DIL"
+    DL = "DL"
+    R10B = "R10B"
+    R11B = "R11B"
+    R12B = "R12B"
+    R13B = "R13B"
+    R14B = "R14B"
+    R15B = "R15B"
+    R8B = "R8B"
+    R9B = "R9B"
+    SIL = "SIL"
+    SPL = "SPL"
+
+
+class STATUSFLAGS(RegEnum):
+    CF = "CF"
+    PF = "PF"
+    AF = "AF"
+    ZF = "ZF"
+    SF = "SF"
+    OF = "OF"
+
+
+class STATUSFLAGS_noAF(RegEnum):
+    CF = "CF"
+    PF = "PF"
+    ZF = "ZF"
+    SF = "SF"
+    OF = "OF"
+
 
 def regTo64(reg):
    if 'AX' in reg or 'AH' in reg or 'AL' in reg: return 'RAX'
@@ -93,7 +202,7 @@ def regToSize(reg, size):
 
 # Returns for a GPR the corresponding 64-bit registers, and for a (X|Y|Z)MM register the corresponding XMM register
 def getCanonicalReg(reg):
-   if reg in GPRegs:
+   if reg in GPRegs.all():
       return regTo64(reg)
    elif 'MM' in reg:
       return re.sub('^[YZ]', 'X', reg)
@@ -117,7 +226,7 @@ def getRegSize(reg):
    if reg[-1] == 'L' or reg[-1] == 'H' or reg[-1] == 'B': return 8
    elif reg[-1] == 'W' or reg in ['AX', 'BX', 'CX', 'DX', 'SP', 'BP' 'SI', 'DI']: return 16
    elif reg[0] == 'E' or reg[-1] == 'D': return 32
-   elif reg in GPRegs: return 64
+   elif reg in GPRegs.all(): return 64
    elif reg.startswith('MM'): return 64
    elif reg.startswith('XMM'): return 128
    elif reg.startswith('YMM'): return 256

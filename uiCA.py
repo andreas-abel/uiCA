@@ -148,7 +148,7 @@ class Instr:
        return "Instr: " + str(self.__dict__)
 
    def canBeUsedByLSD(self):
-      return not (self.uopsMS or self.implicitRSPChange or any((op.reg in High8Regs) for op in self.inputRegOperands+self.outputRegOperands))
+      return not (self.uopsMS or self.implicitRSPChange or any((op.reg in High8Regs.all()) for op in self.inputRegOperands+self.outputRegOperands))
 
 
 class UnknownInstr(Instr):
@@ -379,7 +379,7 @@ class Renamer:
                   if key in self.renameDict:
                      prevRenOp = self.renameDict[key]
                      if (not uop.eliminated) or (prevRenOp != self.curInstrRndRenameDict[key]):
-                        if (key in GPRegs) and (prevRenOp in self.multiUseGPRDict):
+                        if (key in GPRegs.all()) and (prevRenOp in self.multiUseGPRDict):
                            self.multiUseGPRDict[prevRenOp].remove(key)
                         elif (type(key) == str) and ('MM' in key) and (prevRenOp in self.multiUseSIMDDict):
                            if self.multiUseSIMDDict[prevRenOp]:
@@ -1274,7 +1274,7 @@ def adjustLatenciesAndAddMergeUops(instructions):
          canonicalReg = getCanonicalReg(op.reg)
          if (canonicalReg in ['RAX', 'RBX', 'RCX', 'RDX']) and (getRegSize(op.reg) > 8):
             high8RegClean[canonicalReg] = True
-         elif (op.reg in High8Regs) and (op in instr.outputRegOperands):
+         elif (op.reg in High8Regs.all()) and (op in instr.outputRegOperands):
             high8RegClean[canonicalReg] = False
 
    for instr in instructions:
@@ -1291,7 +1291,7 @@ def adjustLatenciesAndAddMergeUops(instructions):
                   for k in list(uop.latencies.keys()):
                      uop.latencies[k] -= 1
 
-         if any(high8RegClean[getCanonicalReg(inOp.reg)] for inOp in uop.inputOperands if isinstance(inOp, RegOperand) and (inOp.reg in High8Regs)):
+         if any(high8RegClean[getCanonicalReg(inOp.reg)] for inOp in uop.inputOperands if isinstance(inOp, RegOperand) and (inOp.reg in High8Regs.all())):
             for key in list(uop.latencies.keys()):
                uop.latencies[key] += 1
 
@@ -1463,7 +1463,7 @@ def getInstructions(filename, rawFile, iacaMarkers, archData, noMicroFusion=Fals
 
    instructions = []
    for instrD in disas:
-      usedRegs = [getCanonicalReg(r) for _, r in instrD.regOperands.items() if r in GPRegs or 'MM' in r]
+      usedRegs = [getCanonicalReg(r) for _, r in instrD.regOperands.items() if r in GPRegs.all() or 'MM' in r]
       sameReg = (len(usedRegs) > 1 and len(set(usedRegs)) == 1)
       usesIndexedAddr = any((getMemAddr(memOp).index is not None) for memOp in instrD.memOperands.values())
       posNominalOpcode = int(instrD.attributes.get('POS_NOMINAL_OPCODE', 0))
