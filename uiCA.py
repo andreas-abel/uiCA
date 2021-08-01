@@ -1453,7 +1453,7 @@ def computeUopProperties(instructions):
 def getInstructions(filename, rawFile, iacaMarkers, archData, noMicroFusion=False, noMacroFusion=False):
    xedBinary = os.path.join(os.path.dirname(os.path.realpath(__file__)), 'xed')
    output = subprocess.check_output([xedBinary, '-64', '-v', '4', '-isa-set', '-chip-check', uArchConfig.XEDName,
-                                     ('-ir' if rawFile else '-i'), filename]).decode()
+                                     ('-ir' if rawFile else '-i'), filename], stderr=subprocess.DEVNULL).decode()
    if 'ERROR: GENERAL_ERROR Could not decode at offset:' in output:
       print('\n'.join(l for l in output.splitlines() if 'ERROR: GENERAL_ERROR Could not decode at offset:' in l))
       exit(1)
