@@ -1490,8 +1490,8 @@ def getInstructions(filename, rawFile, iacaMarkers, archData, noMicroFusion=Fals
          if all(instrD.attributes.get(k, '0') == v for k, v in attrData.items()):
             perfData = archData.perfData[instrData['perfData']]
             uops = perfData.get('uops', 0)
-            retireSlots = perfData.get('retSlots', 0)
-            uopsMITE = perfData.get('uopsMITE', 0)
+            retireSlots = perfData.get('retSlots', 1)
+            uopsMITE = perfData.get('uopsMITE', 1)
             uopsMS = perfData.get('uopsMS', 0)
             latData = perfData.get('lat', dict())
             portData = perfData.get('ports', {})

@@ -75,7 +75,10 @@ def main():
                   else:
                      mValue = measurementNode.attrib.get(mKey+mSuffix)
                      if mValue is not None:
-                        perfData[iKey+iSuffix] = int(mValue)
+                        intValue = int(mValue)
+                        if mKey in ['uops_retire_slots', 'uops_MITE']:
+                           intValue = max(1, intValue)
+                        perfData[iKey+iSuffix] = intValue
                if instrString in ['CPUID', 'MFENCE', 'PAUSE', 'RDTSC'] or XMLInstr.attrib.get('locked', '') == '1':
                   TP_loop = measurementNode.attrib.get('TP_loop'+mSuffix)
                   TP_unrolled = measurementNode.attrib.get('TP_unrolled'+mSuffix)
