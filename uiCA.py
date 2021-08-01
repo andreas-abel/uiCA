@@ -6,18 +6,18 @@ import re
 from collections import Counter, deque, namedtuple, OrderedDict
 from heapq import heappop, heappush
 from itertools import count
-from typing import List, Set, Dict, NamedTuple
+from typing import List, Set, Dict, NamedTuple, Optional
 
 import random
 random.seed(0)
 
 from disas import *
 from x64_lib import *
-from microArchConfigs import MicroArchConfigs
+from microArchConfigs import MicroArchConfig, MicroArchConfigs
 
 
 clock = 0
-uArchConfig = None
+uArchConfig: MicroArchConfig
 
 class UopProperties:
    def __init__(self, instr, possiblePorts, inputOperands, outputOperands, latencies, divCycles=0, isLoadUop=False, isStoreAddressUop=False, memAddr=None,
@@ -46,7 +46,7 @@ class Uop:
       self.idx = next(self.idx_iter)
       self.prop: UopProperties = prop
       self.instrI: InstrInstance = instrI
-      self.fusedUop: FusedUop = None # fused-domain uop that contains this uop
+      self.fusedUop: Optional[FusedUop] = None # fused-domain uop that contains this uop
       self.actualPort = None
       self.eliminated = False
       self.renamedInputOperands = [] # [op[1] for op in inputOperands] # [(instrInputOperand, renamedInpOperand), ...]
@@ -68,7 +68,7 @@ class FusedUop:
       self.__uops = uops
       for uop in uops:
          uop.fusedUop = self
-      self.laminatedUop: LaminatedUop = None # laminated-domain uop that contains this
+      self.laminatedUop: Optional[LaminatedUop] = None # laminated-domain uop that contains this
       self.issued = None # cycle in which this uop was issued
       self.retired = None # cycle in which this uop was retired
       self.retireIdx = None # how many other uops were already retired in the same cycle
@@ -326,7 +326,7 @@ class Renamer:
 
                if (canonicalInpReg in GPRegs):
                   curMultiUseDict = self.multiUseGPRDict
-               elif ('MM' in canonicalInpReg):
+               else:
                   curMultiUseDict = self.multiUseSIMDDict
 
                renamedReg = self.renameDict.setdefault(canonicalInpReg, RenamedOperand())
@@ -1775,7 +1775,7 @@ def CacheBlocksForNextRoundGenerator(instructions, alignmentOffset):
          prevRnd = curRnd
       cacheBlocks.append(cacheBlock)
 
-TableLineData = NamedTuple('TableLineData', [('string', str), ('instr', Instr), ('url', str), ('uopsForRnd', List[List[LaminatedUop]])])
+TableLineData = NamedTuple('TableLineData', [('string', str), ('instr', Optional[Instr]), ('url', Optional[str]), ('uopsForRnd', List[List[LaminatedUop]])])
 
 def getUopsTableColumns(tableLineData: List[TableLineData]):
    columnKeys = ['MITE', 'MS', 'DSB', 'LSD', 'Issued', 'Exec.']
