@@ -61,18 +61,3 @@ The following parameters are optional. Parameter names may be abbreviated if the
 | `-simpleFrontEnd`        | Simulate a simple front end that is only limited by the issue width. |
 | `-noMicroFusion`         | Simulate a CPU variant that does not support micro-fusion. |
 | `-noMacroFusion`         | Simulate a CPU variant that does not support macro-fusion. |
-
-Note that the IACA markers used here are slightly different from what the original IACA uses.
-The start marker should be
-
-    ud2 ; db 0fh, 0bh
-    mov ebx, 111
-    db 064h, 067h, 090h
-
-and the end marker
-
-    mov ebx, 222
-    db 064h, 067h, 090h
-    ud2 ; db 0fh, 0bh
-
-(Stock IACA uses these sequences without UD2.)
