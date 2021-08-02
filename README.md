@@ -12,32 +12,42 @@ Details on uiCA's pipeline model, as well as a comparison with similar tools, ca
 
 An online version of uiCA is available at [uiCA.uops.info](https://uiCA.uops.info).
 
-## Installation (Ubuntu)
+## Installation
+### Ubuntu
 
-Prerequisites:
+* Prerequisites:
 
-    sudo apt-get install gcc python3 python3-pip
-    pip3 install plotly
+      sudo apt-get install gcc python3 python3-pip
+      pip3 install plotly
 
-Installation:
+* Installation:
 
-    git clone ...
-    cd uiCA
-    ./setup.sh
+      git clone https://github.com/andreas-abel/uiCA.git
+      cd uiCA
+      ./setup.sh
 
-## Installation (Windows)
+* Update:
 
-Prerequisites: Python 3, Microsoft Visual C++ (might work with Clang installed as well)
+      git pull
+      ./setup.sh
 
-For graphs:
+### Windows
 
-    pip3 install plotly
+* Prerequisites:
+  * [Python 3](https://www.python.org/downloads/)
+  * [MSVS compiler](https://visualstudio.microsoft.com/de/vs/features/cplusplus/)
+  * `pip3 install plotly`
 
-Installation:
+* Installation:
 
-    git clone ...
-    cd uiCA
-    setup
+      git clone https://github.com/andreas-abel/uiCA.git
+      cd uiCA
+      .\setup.cmd
+
+* Update:
+
+      git pull
+      .\setup.cmd
 
 ## Example Usage
 
