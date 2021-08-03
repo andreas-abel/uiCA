@@ -1775,7 +1775,16 @@ def CacheBlocksForNextRoundGenerator(instructions, alignmentOffset):
          prevRnd = curRnd
       cacheBlocks.append(cacheBlock)
 
-TableLineData = NamedTuple('TableLineData', [('string', str), ('instr', Optional[Instr]), ('url', Optional[str]), ('uopsForRnd', List[List[LaminatedUop]])])
+TableLineData = NamedTuple('TableLineData', [('string', str), ('instr', Optional[Instr]), ('url', Optional[str]), ('uopsForRnd', List[List[LaminatedUop]]), ('address', Optional[int])])
+
+def isBlockEndingBranch(tld, startAddr=None):
+   if not tld.instr or uArchConfig.branchCanBeLastInstrInCachedBlock:
+      return False
+
+   if startAddr == None:
+      startAddr = tld.address
+   endAddr = tld.address + (len(tld.instr.opcode)//2)
+   return tld.instr.isBranchInstr and startAddr//32 != endAddr//32
 
 def getUopsTableColumns(tableLineData: List[TableLineData]):
    columnKeys = ['MITE', 'MS', 'DSB', 'LSD', 'Issued', 'Exec.']
@@ -1784,6 +1793,7 @@ def getUopsTableColumns(tableLineData: List[TableLineData]):
       columnKeys.append('Div')
    columnKeys.append('Notes')
    columns = OrderedDict([(k, []) for k in columnKeys])
+   startAddr = None # for fused pairs
 
    for tld in tableLineData:
       for c in columns.values():
@@ -1792,7 +1802,13 @@ def getUopsTableColumns(tableLineData: List[TableLineData]):
          columns['Notes'][-1] = 'X'
       elif tld.instr and tld.instr.macroFusedWithPrevInstr:
          columns['Notes'][-1] = 'M'
+         if isBlockEndingBranch(tld, startAddr):
+            columns['Notes'][-1] += 'J'
          continue
+      if tld.instr:
+         startAddr = tld.address
+         if isBlockEndingBranch(tld):
+            columns['Notes'][-1] = 'J'
       for lamUops in tld.uopsForRnd:
          for lamUop in lamUops:
             if lamUop.uopSource in ['MITE', 'MS', 'DSB', 'LSD']:
@@ -1825,6 +1841,7 @@ def printUopsTable(tableLineData, addHyperlink=True):
    columns = getUopsTableColumns(tableLineData)
 
    if 'Notes' in columns:
+      if 'J' in columns['Notes'] or 'MJ' in columns['Notes']: print('J - Jcc ending DSB block')
       if 'M' in columns['Notes']: print('M - Macro-fused with previous instruction')
       if 'X' in columns['Notes']: print('X - Instruction not supported')
       print('')
@@ -2319,20 +2336,22 @@ def main():
          relevantInstrInstancesForInstr[instrI.instr].append(instrI)
 
    tableLineData = []
+   address = args.alignmentOffset
    for instr in instructions:
       instrInstances = relevantInstrInstancesForInstr[instr]
       if any(instrI.regMergeUops for instrI in instrInstances):
          uops = [instrI.regMergeUops for instrI in instrInstances]
-         tableLineData.append(TableLineData('<Register Merge Uop>', None, None, uops))
+         tableLineData.append(TableLineData('<Register Merge Uop>', None, None, uops, None))
       if any(instrI.stackSyncUops for instrI in instrInstances):
          uops = [instrI.stackSyncUops for instrI in instrInstances]
-         tableLineData.append(TableLineData('<Stack Sync Uop>', None, None, uops))
+         tableLineData.append(TableLineData('<Stack Sync Uop>', None, None, uops, None))
 
       uops = [instrI.uops for instrI in instrInstances]
       url = None
       if not isinstance(instr, UnknownInstr):
          url = getURL(instr.instrStr)
-      tableLineData.append(TableLineData(instr.asm, instr, url, uops))
+      tableLineData.append(TableLineData(instr.asm, instr, url, uops, address))
+      address += len(instr.opcode) // 2
 
    bottlenecks = getBottlenecks(TP, perfEvents, relevantInstrInstances, lastRelevantRound - firstRelevantRound + 1)
    if bottlenecks:
