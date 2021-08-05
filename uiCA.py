@@ -1519,10 +1519,11 @@ def getInstructions(filename, rawFile, iacaMarkers, archData, alignmentOffset, n
                nAvailableSimpleDecoders = perfData.get('sDec_I', nAvailableSimpleDecoders)
                TP = perfData.get('TP_I', TP)
 
-            instrInputRegOperands = [(n,r) for n, r in instrD.regOperands.items() if (not 'IP' in r) and (not 'STACK' in r) and (not 'RFLAGS' in r)
-                                                                                                        and (('R' in instrD.rw[n])
-                                                                                                        #or ('CW' in instrD.rw[n]) #or (getRegSize(r) in [8, 16]))]
-                                                                                                        or any(n==k[0] for k in latData.keys()))]
+            instrInputRegOperands = [(n,r) for n, r in instrD.regOperands.items() if (not 'IP' in r)
+                                        and (not 'STACK' in r)
+                                        and (not 'RFLAGS' in r)
+                                        and ((r != 'K0') or ('{k0}' in instrD.asm)) # otherwise, K0 indicates unmasked operations
+                                        and (('R' in instrD.rw[n]) or any(n==k[0] for k in latData.keys()))]
             instrInputMemOperands = [(n,m) for n, m in instrD.memOperands.items() if ('R' in instrD.rw[n]) or ('CW' in instrD.rw[n])]
 
             instrOutputRegOperands = [(n, r) for n, r in instrD.regOperands.items() if (not 'IP' in r) and (not 'STACK' in r) and (not 'RFLAGS' in r)
