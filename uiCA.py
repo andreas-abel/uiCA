@@ -140,6 +140,7 @@ class Instr:
       self.macroFusibleWith = macroFusibleWith
       self.macroFusedWithPrevInstr = macroFusedWithPrevInstr
       self.macroFusedWithNextInstr = macroFusedWithNextInstr
+      self.cannotBeInDSBDueToJCCErratum = False
       self.UopPropertiesList = [] # list with UopProperties for each (unfused domain) uop
       self.regMergeUopPropertiesList = []
       self.isFirstInstruction = False
@@ -606,10 +607,8 @@ class FrontEnd:
       if (uArchConfig.DSBBlockSize == 64) and len(self.getDSBBlocks(block)) > 6:
          return False
 
-      if not uArchConfig.branchCanBeLastInstrInCachedBlock:
-         lastInstrI = block[-1]
-         if lastInstrI.instr.macroFusedWithNextInstr or (lastInstrI.instr.isBranchInstr and (lastInstrI.address%32) + (len(lastInstrI.instr.opcode)//2) >= 32):
-            return False
+      if block[-1].instr.cannotBeInDSBDueToJCCErratum:
+         return False
 
       if uArchConfig.DSBBlockSize == 32:
          B32Blocks = [block]
@@ -1311,8 +1310,6 @@ def computeUopProperties(instructions):
       if instr.macroFusedWithPrevInstr:
          continue
 
-      allInputOperands = instr.inputRegOperands + instr.inputFlagOperands + instr.memAddrOperands + instr.inputMemOperands
-
       loadPcs = []
       storeAddressPcs = []
       storeDataPcs = []
@@ -1450,7 +1447,7 @@ def computeUopProperties(instructions):
       instr.UopPropertiesList[-1].isLastUopOfInstr = True
 
 
-def getInstructions(filename, rawFile, iacaMarkers, archData, noMicroFusion=False, noMacroFusion=False):
+def getInstructions(filename, rawFile, iacaMarkers, archData, alignmentOffset, noMicroFusion=False, noMacroFusion=False):
    xedBinary = os.path.join(os.path.dirname(os.path.realpath(__file__)), 'xed')
    output = subprocess.check_output([xedBinary, '-64', '-v', '4', '-isa-set', '-chip-check', uArchConfig.XEDName,
                                      ('-ir' if rawFile else '-i'), filename], stderr=subprocess.DEVNULL).decode()
@@ -1461,7 +1458,7 @@ def getInstructions(filename, rawFile, iacaMarkers, archData, noMicroFusion=Fals
    disas = parseXedOutput(output, iacaMarkers)
    zmmRegistersInUse = any(('ZMM' in reg) for instrD in disas for reg in instrD.regOperands.values())
 
-   instructions = []
+   instructions: List[Instr] = []
    for instrD in disas:
       usedRegs = [getCanonicalReg(r) for _, r in instrD.regOperands.items() if r in GPRegs or 'MM' in r]
       sameReg = (len(usedRegs) > 1 and len(set(usedRegs)) == 1)
@@ -1682,6 +1679,18 @@ def getInstructions(filename, rawFile, iacaMarkers, archData, noMicroFusion=Fals
       else:
          instruction.isFirstInstruction = True
 
+      # JCC erratum
+      if not uArchConfig.branchCanBeLastInstrInCachedBlock:
+         addr = alignmentOffset + sum((len(prevInstr.opcode) // 2) for prevInstr in instructions)
+         nextAddr = addr + (len(instruction.opcode) // 2)
+         if instruction.isBranchInstr and (addr // 32) != (nextAddr // 32):
+            instruction.cannotBeInDSBDueToJCCErratum = True
+         if instruction.macroFusedWithPrevInstr:
+            prevInstr = instructions[-1]
+            prevAddr = addr - (len(prevInstr.opcode) // 2)
+            if (prevAddr // 32) != (nextAddr // 32):
+               prevInstr.cannotBeInDSBDueToJCCErratum = True
+
       instructions.append(instruction)
    return instructions
 
@@ -1793,6 +1802,8 @@ def getUopsTableColumns(tableLineData: List[TableLineData]):
       elif tld.instr and tld.instr.macroFusedWithPrevInstr:
          columns['Notes'][-1] = 'M'
          continue
+      elif tld.instr and tld.instr.cannotBeInDSBDueToJCCErratum:
+         columns['Notes'][-1] = 'J'
       for lamUops in tld.uopsForRnd:
          for lamUop in lamUops:
             if lamUop.uopSource in ['MITE', 'MS', 'DSB', 'LSD']:
@@ -1821,16 +1832,22 @@ def formatTableValue(val):
    return val if (val != '0') else ''
 
 
+def getTerminalHyperlink(url, text):
+   # see https://stackoverflow.com/a/46289463/10461973
+   return '\x1b]8;;{}\a{}\x1b]8;;\a'.format(url, text)
+
 def printUopsTable(tableLineData, addHyperlink=True):
    columns = getUopsTableColumns(tableLineData)
 
    if 'Notes' in columns:
+      if 'J' in columns['Notes']:
+         jccURL = 'https://www.intel.com/content/dam/support/us/en/documents/processors/mitigations-jump-conditional-code-erratum.pdf'
+         print('J - Block not in DSB due to ' + getTerminalHyperlink(jccURL, 'JCC erratum'))
       if 'M' in columns['Notes']: print('M - Macro-fused with previous instruction')
       if 'X' in columns['Notes']: print('X - Instruction not supported')
       print('')
 
    columnWidthList = [2 + max(len(k), max(len(formatTableValue(l)) for l in lines)) for k, lines in columns.items()]
-   tableWidth = sum(columnWidthList) + len(columns.keys()) + 1
 
    def getTableBorderLine(firstC, middleC, lastC):
       line = ''
@@ -1864,8 +1881,7 @@ def printUopsTable(tableLineData, addHyperlink=True):
    for i, tld in enumerate(tableLineData):
       line = getTableLine([formatTableValue(v[i]) for v in columns.values()]) + ' '
       if addHyperlink and (tld.url is not None):
-         # see https://stackoverflow.com/a/46289463/10461973
-         line += '\x1b]8;;{}\a{}\x1b]8;;\a'.format(tld.url, tld.string)
+         line += getTerminalHyperlink(tld.url, tld.string)
       else:
          line += tld.string
       print(line)
@@ -2249,8 +2265,8 @@ def main():
    global uArchConfig
    uArchConfig = MicroArchConfigs[args.arch]
 
-   instructions = getInstructions(args.filename, args.raw, args.iacaMarkers, importlib.import_module('instrData.'+uArchConfig.name), args.noMicroFusion,
-                                  args.noMacroFusion)
+   instructions = getInstructions(args.filename, args.raw, args.iacaMarkers, importlib.import_module('instrData.'+uArchConfig.name), args.alignmentOffset,
+                                  args.noMicroFusion, args.noMacroFusion)
    if not instructions:
       print('no instructions found')
       exit(1)
