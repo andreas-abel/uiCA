@@ -16,8 +16,6 @@ from x64_lib import *
 from microArchConfigs import MicroArchConfig, MicroArchConfigs
 
 
-uArchConfig: MicroArchConfig
-
 class UopProperties:
    def __init__(self, instr, possiblePorts, inputOperands, outputOperands, latencies, divCycles=0, isLoadUop=False, isStoreAddressUop=False, memAddr=None,
                 isStoreDataUop=False, isFirstUopOfInstr=False, isLastUopOfInstr=False, isRegMergeUop=False):
@@ -92,7 +90,7 @@ class LaminatedUop:
 
 
 class StackSyncUop(Uop):
-   def __init__(self, instrI):
+   def __init__(self, instrI, uArchConfig):
       inOp = RegOperand('RSP')
       outOp = RegOperand('RSP')
       prop = UopProperties(instrI.instr, uArchConfig.stackSyncUopPorts, [inOp], [outOp], {outOp: 1}, isFirstUopOfInstr=True)
@@ -218,9 +216,10 @@ class RenamedOperand:
 AbstractValue = namedtuple('AbstractValue', ['base', 'offset'])
 
 class Renamer:
-   def __init__(self, IDQ, reorderBuffer, initPolicy):
+   def __init__(self, IDQ, reorderBuffer, uArchConfig: MicroArchConfig, initPolicy):
       self.IDQ = IDQ
       self.reorderBuffer = reorderBuffer
+      self.uArchConfig = uArchConfig
       self.initPolicy = initPolicy
 
       self.renameDict = {}
@@ -275,7 +274,7 @@ class Renamer:
          if firstUnfusedUop.prop.isFirstUopOfInstr and firstUnfusedUop.prop.instr.isSerializingInstr and not self.reorderBuffer.isEmpty():
             break
          fusedUops = lamUop.getFusedUops()
-         if len(renamerUops) + len(fusedUops) > uArchConfig.issueWidth:
+         if len(renamerUops) + len(fusedUops) > self.uArchConfig.issueWidth:
             break
          renamerUops.extend(fusedUops)
          self.IDQ.popleft()
@@ -289,27 +288,27 @@ class Renamer:
                canonicalInpReg = getCanonicalReg(uop.prop.instr.inputRegOperands[0].reg)
 
                if (canonicalInpReg in GPRegs):
-                  if uArchConfig.moveEliminationGPRSlots == 'unlimited':
+                  if self.uArchConfig.moveEliminationGPRSlots == 'unlimited':
                      nGPRMoveElimPossible = 1
                   else:
-                     nGPRMoveElimPossible = (uArchConfig.moveEliminationGPRSlots - nGPRMoveElim
-                           - sum(self.nGPRMoveElimInCycle.get(self.renamerActiveCycle - i, 0) for i in range(1, uArchConfig.moveEliminationPipelineLength))
-                           - self.multiUseGPRDictUseInCycle.get(self.renamerActiveCycle - uArchConfig.moveEliminationPipelineLength, 0))
+                     nGPRMoveElimPossible = (self.uArchConfig.moveEliminationGPRSlots - nGPRMoveElim
+                           - sum(self.nGPRMoveElimInCycle.get(self.renamerActiveCycle - i, 0) for i in range(1, self.uArchConfig.moveEliminationPipelineLength))
+                           - self.multiUseGPRDictUseInCycle.get(self.renamerActiveCycle - self.uArchConfig.moveEliminationPipelineLength, 0))
                   if nGPRMoveElimPossible > 0:
                      uop.eliminated = True
                      nGPRMoveElim += 1
                elif ('MM' in canonicalInpReg):
-                  if uArchConfig.moveEliminationSIMDSlots == 'unlimited':
+                  if self.uArchConfig.moveEliminationSIMDSlots == 'unlimited':
                      nSIMDMoveElimPossible = 1
                   else:
-                     nSIMDMoveElimPossible = (uArchConfig.moveEliminationSIMDSlots - nSIMDMoveElim
-                           - sum(self.nSIMDMoveElimInCycle.get(self.renamerActiveCycle - i, 0) for i in range(1, uArchConfig.moveEliminationPipelineLength))
-                           - self.multiUseSIMDDictUseInCycle.get(self.renamerActiveCycle - uArchConfig.moveEliminationPipelineLength, 0))
+                     nSIMDMoveElimPossible = (self.uArchConfig.moveEliminationSIMDSlots - nSIMDMoveElim
+                           - sum(self.nSIMDMoveElimInCycle.get(self.renamerActiveCycle - i, 0) for i in range(1, self.uArchConfig.moveEliminationPipelineLength))
+                           - self.multiUseSIMDDictUseInCycle.get(self.renamerActiveCycle - self.uArchConfig.moveEliminationPipelineLength, 0))
                   if nSIMDMoveElimPossible > 0:
                      uop.eliminated = True
                      nSIMDMoveElim += 1
 
-      if (nGPRMoveElim == 0) and (not uArchConfig.moveEliminationGPRAllAliasesMustBeOverwritten):
+      if (nGPRMoveElim == 0) and (not self.uArchConfig.moveEliminationGPRAllAliasesMustBeOverwritten):
          for k, v in list(self.multiUseGPRDict.items()):
             if len(v) <= 1:
                del self.multiUseGPRDict[k]
@@ -455,26 +454,28 @@ class Renamer:
 
 
 class FrontEnd:
-   def __init__(self, instructions, reorderBuffer, scheduler, unroll, alignmentOffset, initPolicy, perfEvents, simpleFrontEnd=False):
+   def __init__(self, instructions: List[Instr], reorderBuffer, scheduler, uArchConfig: MicroArchConfig,
+                unroll, alignmentOffset, initPolicy, perfEvents, simpleFrontEnd=False):
       self.IDQ = deque()
-      self.renamer = Renamer(self.IDQ, reorderBuffer, initPolicy)
+      self.renamer = Renamer(self.IDQ, reorderBuffer, uArchConfig, initPolicy)
       self.reorderBuffer = reorderBuffer
       self.scheduler = scheduler
+      self.uArchConfig = uArchConfig
       self.unroll = unroll
       self.alignmentOffset = alignmentOffset
       self.perfEvents = perfEvents
 
-      self.MS = MicrocodeSequencer()
+      self.MS = MicrocodeSequencer(self.uArchConfig)
 
       self.instructionQueue = deque()
-      self.preDecoder = PreDecoder(self.instructionQueue)
-      self.decoder = Decoder(self.instructionQueue, self.MS)
+      self.preDecoder = PreDecoder(self.instructionQueue, self.uArchConfig)
+      self.decoder = Decoder(self.instructionQueue, self.MS, self.uArchConfig)
 
       self.RSPOffset = 0
 
       self.allGeneratedInstrInstances: List[InstrInstance] = []
 
-      self.DSB = DSB(self.MS)
+      self.DSB = DSB(self.MS, self.uArchConfig)
       self.addressesInDSB = set()
 
       self.LSDUnrollCount = 1
@@ -490,16 +491,16 @@ class FrontEnd:
          self.cacheBlocksForNextRoundGenerator = CacheBlocksForNextRoundGenerator(instructions, self.alignmentOffset)
          cacheBlocksForFirstRound = next(self.cacheBlocksForNextRoundGenerator)
 
-         if uArchConfig.DSBBlockSize == 32:
+         if self.uArchConfig.DSBBlockSize == 32:
             allBlocksCanBeCached = all(self.canBeCached(block) for cb in cacheBlocksForFirstRound for block in split64ByteBlockTo32ByteBlocks(cb) if block)
          else:
             allBlocksCanBeCached = all(self.canBeCached(block) for block in cacheBlocksForFirstRound)
 
          allInstrsCanBeUsedByLSD = all(instrI.instr.canBeUsedByLSD() for cb in cacheBlocksForFirstRound for instrI in cb)
          nUops = sum(len(instrI.uops) for cb in cacheBlocksForFirstRound for instrI in cb)
-         if allBlocksCanBeCached and uArchConfig.LSDEnabled and allInstrsCanBeUsedByLSD and (nUops <= uArchConfig.IDQWidth):
+         if allBlocksCanBeCached and self.uArchConfig.LSDEnabled and allInstrsCanBeUsedByLSD and (nUops <= self.uArchConfig.IDQWidth):
             self.uopSource = 'LSD'
-            self.LSDUnrollCount = uArchConfig.LSDUnrolling(nUops)
+            self.LSDUnrollCount = self.uArchConfig.LSDUnrolling(nUops)
             for cacheBlock in cacheBlocksForFirstRound + [cb for _ in range(0, self.LSDUnrollCount-1) for cb in next(self.cacheBlocksForNextRoundGenerator)]:
                self.addNewCacheBlock(cacheBlock)
          else:
@@ -524,15 +525,15 @@ class FrontEnd:
          self.perfEvents.setdefault(clock, {})['RBFull'] = 1
       if self.scheduler.isFull():
          self.perfEvents.setdefault(clock, {})['RSFull'] = 1
-      if len(self.instructionQueue) + uArchConfig.preDecodeWidth > uArchConfig.IQWidth:
+      if len(self.instructionQueue) + self.uArchConfig.preDecodeWidth > self.uArchConfig.IQWidth:
          self.perfEvents.setdefault(clock, {})['IQFull'] = 1
 
-      if len(self.IDQ) + uArchConfig.DSBWidth > uArchConfig.IDQWidth:
+      if len(self.IDQ) + self.uArchConfig.DSBWidth > self.uArchConfig.IDQWidth:
          self.perfEvents.setdefault(clock, {})['IDQFull'] = 1
          return
 
       if self.uopSource is None:
-         while len(self.IDQ) < uArchConfig.issueWidth:
+         while len(self.IDQ) < self.uArchConfig.issueWidth:
             for instrI in next(self.cacheBlockGenerator):
                self.allGeneratedInstrInstances.append(instrI)
                for lamUop in instrI.uops:
@@ -586,9 +587,9 @@ class FrontEnd:
 
    def findCacheableAddresses(self, cacheBlocksForFirstRound):
       for cacheBlock in cacheBlocksForFirstRound:
-         if uArchConfig.DSBBlockSize == 32:
+         if self.uArchConfig.DSBBlockSize == 32:
             splitCacheBlocks = [block for block in split64ByteBlockTo32ByteBlocks(cacheBlock) if block]
-            if uArchConfig.both32ByteBlocksMustBeCacheable and any((not self.canBeCached(block)) for block in splitCacheBlocks):
+            if self.uArchConfig.both32ByteBlocksMustBeCacheable and any((not self.canBeCached(block)) for block in splitCacheBlocks):
                return
          else:
             splitCacheBlocks = [cacheBlock]
@@ -601,15 +602,15 @@ class FrontEnd:
                return
 
    def canBeCached(self, block):
-      if (uArchConfig.DSBBlockSize == 32) and len(self.getDSBBlocks(block)) > 3:
+      if (self.uArchConfig.DSBBlockSize == 32) and len(self.getDSBBlocks(block)) > 3:
          return False
-      if (uArchConfig.DSBBlockSize == 64) and len(self.getDSBBlocks(block)) > 6:
+      if (self.uArchConfig.DSBBlockSize == 64) and len(self.getDSBBlocks(block)) > 6:
          return False
 
       if block[-1].instr.cannotBeInDSBDueToJCCErratum:
          return False
 
-      if uArchConfig.DSBBlockSize == 32:
+      if self.uArchConfig.DSBBlockSize == 32:
          B32Blocks = [block]
       else:
          B32Blocks = split64ByteBlockTo32ByteBlocks(block)
@@ -676,7 +677,7 @@ class FrontEnd:
             for uop in instrI.uops:
                uop.uopSource = 'LSD'
       else:
-         if uArchConfig.DSBBlockSize == 32:
+         if self.uArchConfig.DSBBlockSize == 32:
             blocks = split64ByteBlockTo32ByteBlocks(cacheBlock)
          else:
             blocks = [cacheBlock]
@@ -689,7 +690,7 @@ class FrontEnd:
             else:
                for instrI in block:
                   instrI.source = 'MITE'
-               if uArchConfig.DSBBlockSize == 32:
+               if self.uArchConfig.DSBBlockSize == 32:
                   B16Blocks = split32ByteBlockTo16ByteBlocks(block)
                else:
                   B16Blocks = split64ByteBlockTo16ByteBlocks(block)
@@ -721,7 +722,7 @@ class FrontEnd:
          self.RSPOffset = 0
 
       if requiresSyncUop:
-         stackSyncUop = StackSyncUop(uop.instrI)
+         stackSyncUop = StackSyncUop(uop.instrI, self.uArchConfig)
          lamUop = LaminatedUop([FusedUop([stackSyncUop])])
          self.IDQ.append(lamUop)
          lamUop.addedToIDQ = clock
@@ -732,9 +733,10 @@ class FrontEnd:
 DSBEntry = namedtuple('DSBEntry', ['instrI', 'uop', 'MSUops', 'requiresExtraEntry'])
 
 class DSB:
-   def __init__(self, MS):
+   def __init__(self, MS, uArchConfig: MicroArchConfig):
       self.MS = MS
       self.DSBBlockQueue = deque()
+      self.uArchConfig = uArchConfig
 
    def cycle(self):
       DSBBlock = self.DSBBlockQueue[0]
@@ -749,7 +751,7 @@ class DSB:
 
       retList = []
       secondDSBBlockLoaded = False
-      for _ in range(0, uArchConfig.DSBWidth):
+      for _ in range(0, self.uArchConfig.DSBWidth):
          if not DSBBlock:
             if (not secondDSBBlockLoaded) and self.DSBBlockQueue:
                secondDSBBlockLoaded = True
@@ -764,13 +766,13 @@ class DSB:
 
          entry = DSBBlock[0]
 
-         if (entry is not None) and entry.requiresExtraEntry and (len(retList) == uArchConfig.DSBWidth - 1):
+         if (entry is not None) and entry.requiresExtraEntry and (len(retList) == self.uArchConfig.DSBWidth - 1):
             return retList
 
          DSBBlock.popleft()
 
          if (entry is not None) and all((e is None) for e in DSBBlock):
-            if (len(self.DSBBlockQueue) > 1) and ((uArchConfig.DSBBlockSize == 64)
+            if (len(self.DSBBlockQueue) > 1) and ((self.uArchConfig.DSBBlockSize == 64)
                   or (self.DSBBlockQueue[1][0].instrI.address//32 != entry.instrI.address//32)):
                if entry.instrI.instr.isBranchInstr or entry.instrI.instr.macroFusedWithNextInstr:
                   if (len(DSBBlock) == 5):
@@ -799,7 +801,8 @@ class DSB:
 
 
 class MicrocodeSequencer:
-   def __init__(self):
+   def __init__(self, uArchConfig: MicroArchConfig):
+      self.uArchConfig = uArchConfig
       self.uopQueue = deque()
       self.stalled = 0
       self.postStall = 0
@@ -823,7 +826,7 @@ class MicrocodeSequencer:
          self.stalled = 1
          self.postStall = 1
       elif prevUopSource == 'DSB':
-         self.stalled = uArchConfig.DSB_MS_Stall
+         self.stalled = self.uArchConfig.DSB_MS_Stall
          self.postStall = 0
 
    def isBusy(self):
@@ -831,28 +834,29 @@ class MicrocodeSequencer:
 
 
 class Decoder:
-   def __init__(self, instructionQueue, MS):
+   def __init__(self, instructionQueue, MS: MicrocodeSequencer, uArchConfig: MicroArchConfig):
       self.instructionQueue = instructionQueue
       self.MS = MS
+      self.uArchConfig = uArchConfig
 
    def cycle(self, clock):
       uopsList = []
       nDecodedInstrs = 0
-      remainingDecoderSlots = uArchConfig.nDecoders
+      remainingDecoderSlots = self.uArchConfig.nDecoders
       while self.instructionQueue:
          instrI: InstrInstance = self.instructionQueue[0]
          if instrI.instr.macroFusedWithPrevInstr:
             self.instructionQueue.popleft()
             instrI.removedFromIQ = clock
             continue
-         if instrI.predecoded + uArchConfig.predecodeDecodeDelay > clock:
+         if instrI.predecoded + self.uArchConfig.predecodeDecodeDelay > clock:
             break
          if uopsList and instrI.instr.complexDecoder:
             break
-         if instrI.instr.macroFusibleWith and (not uArchConfig.macroFusibleInstrCanBeDecodedAsLastInstr):
-            if nDecodedInstrs == uArchConfig.nDecoders-1:
+         if instrI.instr.macroFusibleWith and (not self.uArchConfig.macroFusibleInstrCanBeDecodedAsLastInstr):
+            if nDecodedInstrs == self.uArchConfig.nDecoders-1:
                break
-            if (len(self.instructionQueue) <= 1) or (self.instructionQueue[1].predecoded + uArchConfig.predecodeDecodeDelay > clock):
+            if (len(self.instructionQueue) <= 1) or (self.instructionQueue[1].predecoded + self.uArchConfig.predecodeDecodeDelay > clock):
                break
          self.instructionQueue.popleft()
          instrI.removedFromIQ = clock
@@ -885,7 +889,8 @@ class Decoder:
 
 
 class PreDecoder:
-   def __init__(self, instructionQueue):
+   def __init__(self, instructionQueue, uArchConfig: MicroArchConfig):
+      self.uArchConfig = uArchConfig
       self.B16BlockQueue = deque() # a deque of 16 Byte blocks (i.e., deques of InstrInstances)
       self.instructionQueue = instructionQueue
       self.preDecQueue = deque() # instructions are queued here before they are added to the instruction queue after all stalls have been resolved
@@ -895,7 +900,7 @@ class PreDecoder:
    def cycle(self, clock):
       if not self.stalled:
          if ((not self.preDecQueue) and (self.B16BlockQueue or self.partialInstrI)
-                                       and len(self.instructionQueue) + uArchConfig.preDecodeWidth <= uArchConfig.IQWidth):
+                                       and len(self.instructionQueue) + self.uArchConfig.preDecodeWidth <= self.uArchConfig.IQWidth):
             if self.partialInstrI is not None:
                self.preDecQueue.append(self.partialInstrI)
                self.partialInstrI = None
@@ -903,7 +908,7 @@ class PreDecoder:
             if self.B16BlockQueue:
                curBlock = self.B16BlockQueue[0]
 
-               while curBlock and len(self.preDecQueue) < uArchConfig.preDecodeWidth:
+               while curBlock and len(self.preDecQueue) < self.uArchConfig.preDecodeWidth:
                   if instrInstanceCrosses16ByteBoundary(curBlock[0]):
                      break
                   self.preDecQueue.append(curBlock.popleft())
@@ -932,16 +937,18 @@ class PreDecoder:
    def isEmpty(self):
       return (not self.B16BlockQueue) and (not self.preDecQueue) and (not self.partialInstrI)
 
+
 class ReorderBuffer:
-   def __init__(self, retireQueue):
+   def __init__(self, retireQueue, uArchConfig: MicroArchConfig):
       self.uops = deque()
       self.retireQueue = retireQueue
+      self.uArchConfig = uArchConfig
 
    def isEmpty(self):
       return not self.uops
 
    def isFull(self):
-      return len(self.uops) + uArchConfig.issueWidth > uArchConfig.RBWidth
+      return len(self.uops) + self.uArchConfig.issueWidth > self.uArchConfig.RBWidth
 
    def cycle(self, clock, newUops):
       self.retireUops(clock)
@@ -949,7 +956,7 @@ class ReorderBuffer:
 
    def retireUops(self, clock):
       nRetiredInSameCycle = 0
-      for _ in range(0, uArchConfig.retireWidth):
+      for _ in range(0, self.uArchConfig.retireWidth):
          if not self.uops: break
          fusedUop = self.uops[0]
          unfusedUops = fusedUop.getUnfusedUops()
@@ -971,16 +978,17 @@ class ReorderBuffer:
 
 
 class Scheduler:
-   def __init__(self):
+   def __init__(self, uArchConfig: MicroArchConfig):
+      self.uArchConfig = uArchConfig
       self.uops = set()
-      self.portUsage = {p:0  for p in uArchConfig.allPorts}
+      self.portUsage = {p:0  for p in self.uArchConfig.allPorts}
       self.portUsageAtStartOfCycle = {}
       self.nextP23Port = '2'
       self.nextP49Port = '4'
       self.nextP78Port = '7'
       self.uopsDispatchedInPrevCycle = [] # the port usage counter is decreased one cycle after uops are dispatched
       self.divBusy = 0
-      self.readyQueue = {p:[] for p in uArchConfig.allPorts}
+      self.readyQueue = {p:[] for p in self.uArchConfig.allPorts}
       self.readyDivUops = []
       self.uopsReadyInCycle = {}
       self.nonReadyUops = [] # uops not yet added to uopsReadyInCycle (in order)
@@ -993,7 +1001,7 @@ class Scheduler:
       self.dependentUops = dict() # uops that have an operand that is written by a non-executed uop
 
    def isFull(self):
-      return len(self.uops) + uArchConfig.issueWidth > uArchConfig.RSWidth
+      return len(self.uops) + self.uArchConfig.issueWidth > self.uArchConfig.RSWidth
 
    def cycle(self, clock, newUops):
       self.divBusy = max(0, self.divBusy-1)
@@ -1013,7 +1021,7 @@ class Scheduler:
       self.updateBlockedResources()
 
    def dispatchUops(self, clock):
-      applicablePorts = list(uArchConfig.allPorts)
+      applicablePorts = list(self.uArchConfig.allPorts)
 
       if ('4' in applicablePorts) and ('9' in applicablePorts) and self.readyQueue['4'] and self.readyQueue['9']:
          # two stores can be executed in the same cycle if they access the same cache line; see 'Paired Stores' in the optimization manual
@@ -1149,9 +1157,9 @@ class Scheduler:
                continue
             if len(uop.prop.possiblePorts) == 1:
                port = uop.prop.possiblePorts[0]
-            elif uArchConfig.simplePortAssignment:
+            elif self.uArchConfig.simplePortAssignment:
                port = random.choice(uop.prop.possiblePorts)
-            elif len(uArchConfig.allPorts) == 10:
+            elif len(self.uArchConfig.allPorts) == 10:
                applicablePortUsages = [(p,u) for p, u in self.portUsageAtStartOfCycle.get(clock-1, self.portUsageAtStartOfCycle[clock]).items()
                                        if p in uop.prop.possiblePorts]
                sortedPortUsages = sorted(applicablePortUsages, key=lambda x: (x[1], -int(x[0])))
@@ -1177,7 +1185,7 @@ class Scheduler:
                   port = sortedPorts[1]
                else:
                   port = sortedPorts[nPC % len(sortedPorts)]
-            elif len(uArchConfig.allPorts) == 8:
+            elif len(self.uArchConfig.allPorts) == 8:
                applicablePortUsages = [(p,u) for p, u in self.portUsageAtStartOfCycle[clock].items() if p in uop.prop.possiblePorts]
                minPort, minPortUsage = min(applicablePortUsages, key=lambda x: (x[1], -int(x[0]))) # port with minimum usage so far
 
@@ -1246,16 +1254,16 @@ class Scheduler:
          opReadyCycle = max(opReadyCycle, renInpOp.getReadyCycle())
 
       readyCycle = opReadyCycle
-      if opReadyCycle < uop.fusedUop.issued + uArchConfig.issueDispatchDelay:
-         readyCycle = uop.fusedUop.issued + uArchConfig.issueDispatchDelay
-      elif (opReadyCycle == uop.fusedUop.issued + uArchConfig.issueDispatchDelay) or (opReadyCycle == uop.fusedUop.issued + uArchConfig.issueDispatchDelay + 1): # ToDo: is second condition correct on HSW (ex: dec r10; add r11,0x8; test r10,r10)?
+      if opReadyCycle < uop.fusedUop.issued + self.uArchConfig.issueDispatchDelay:
+         readyCycle = uop.fusedUop.issued + self.uArchConfig.issueDispatchDelay
+      elif (opReadyCycle == uop.fusedUop.issued + self.uArchConfig.issueDispatchDelay) or (opReadyCycle == uop.fusedUop.issued + self.uArchConfig.issueDispatchDelay + 1): # ToDo: is second condition correct on HSW (ex: dec r10; add r11,0x8; test r10,r10)?
          readyCycle = opReadyCycle + 1
 
       return max(clock + 1, readyCycle)
 
 
 # must only be called once for a given list of instructions
-def adjustLatenciesAndAddMergeUops(instructions):
+def adjustLatenciesAndAddMergeUops(instructions, uArchConfig: MicroArchConfig):
    prevWriteToReg = dict() # reg -> instr
    high8RegClean = {'RAX': True, 'RBX': True, 'RCX': True, 'RDX': True}
 
@@ -1445,7 +1453,7 @@ def computeUopProperties(instructions):
       instr.UopPropertiesList[-1].isLastUopOfInstr = True
 
 
-def getInstructions(filename, rawFile, iacaMarkers, archData, alignmentOffset, noMicroFusion=False, noMacroFusion=False):
+def getInstructions(filename, rawFile, uArchConfig: MicroArchConfig, iacaMarkers, archData, alignmentOffset, noMicroFusion=False, noMacroFusion=False):
    xedBinary = os.path.join(os.path.dirname(os.path.realpath(__file__)), 'xed')
    output = subprocess.check_output([xedBinary, '-64', '-v', '4', '-isa-set', '-chip-check', uArchConfig.XEDName,
                                      ('-ir' if rawFile else '-i'), filename], stderr=subprocess.DEVNULL).decode()
@@ -1785,7 +1793,7 @@ def CacheBlocksForNextRoundGenerator(instructions, alignmentOffset):
 
 TableLineData = NamedTuple('TableLineData', [('string', str), ('instr', Optional[Instr]), ('url', Optional[str]), ('uopsForRnd', List[List[LaminatedUop]])])
 
-def getUopsTableColumns(tableLineData: List[TableLineData]):
+def getUopsTableColumns(tableLineData: List[TableLineData], uArchConfig: MicroArchConfig):
    columnKeys = ['MITE', 'MS', 'DSB', 'LSD', 'Issued', 'Exec.']
    columnKeys.extend(('Port ' + p) for p in uArchConfig.allPorts)
    if any(uop.prop.divCycles for tld in tableLineData for lamUop in tld.uopsForRnd[0] for uop in lamUop.getUnfusedUops()):
@@ -1835,8 +1843,8 @@ def getTerminalHyperlink(url, text):
    # see https://stackoverflow.com/a/46289463/10461973
    return '\x1b]8;;{}\a{}\x1b]8;;\a'.format(url, text)
 
-def printUopsTable(tableLineData, addHyperlink=True):
-   columns = getUopsTableColumns(tableLineData)
+def printUopsTable(tableLineData, uArchConfig: MicroArchConfig, addHyperlink=True):
+   columns = getUopsTableColumns(tableLineData, uArchConfig)
 
    if 'Notes' in columns:
       if 'J' in columns['Notes']:
@@ -1892,7 +1900,7 @@ def printUopsTable(tableLineData, addHyperlink=True):
    print(getTableBorderLine(u'\u2514', u'\u2534', u'\u2518'))
 
 
-def getBottlenecks(TP, perfEvents, instrInstances: List[InstrInstance], nRounds):
+def getBottlenecks(TP, perfEvents, instrInstances: List[InstrInstance], uArchConfig: MicroArchConfig, nRounds):
    allLamUops = [lamUop for instrI in instrInstances for lamUop in instrI.uops + instrI.regMergeUops + instrI.stackSyncUops]
    allFusedUops = [fUop  for lamUop in allLamUops for fUop in lamUop.getFusedUops()]
    allUnfusedUops = [uop for fUop in allFusedUops for uop in fUop.getUnfusedUops()]
@@ -2046,7 +2054,7 @@ def generateHTMLTraceTable(filename, instructions, instrInstances, lastRelevantR
          f.write(html)
 
 
-def generateHTMLGraph(filename, instructions, instrInstances: List[InstrInstance], maxCycle):
+def generateHTMLGraph(filename, instructions, instrInstances: List[InstrInstance], uArchConfig: MicroArchConfig, maxCycle):
    from plotly.offline import plot
    import plotly.graph_objects as go
 
@@ -2134,7 +2142,7 @@ def generateHTMLGraph(filename, instructions, instrInstances: List[InstrInstance
    writeHtmlFile(filename, 'Graph', head, body, includeDOCTYPE=False) # if DOCTYPE is included, scaling doesn't work properly
 
 
-def generateJSONOutput(filename, instructions: List[Instr], frontEnd: FrontEnd, maxCycle):
+def generateJSONOutput(filename, instructions: List[Instr], frontEnd: FrontEnd, uArchConfig: MicroArchConfig, maxCycle):
    parameters = {
       'uArchName': uArchConfig.name,
       'IQWidth': uArchConfig.IQWidth,
@@ -2261,28 +2269,27 @@ def main():
       print('Unsupported -initPolicy')
       exit(1)
 
-   global uArchConfig
    uArchConfig = MicroArchConfigs[args.arch]
 
-   instructions = getInstructions(args.filename, args.raw, args.iacaMarkers, importlib.import_module('instrData.'+uArchConfig.name), args.alignmentOffset,
-                                  args.noMicroFusion, args.noMacroFusion)
+   instructions = getInstructions(args.filename, args.raw, uArchConfig, args.iacaMarkers, importlib.import_module('instrData.'+uArchConfig.name),
+                                  args.alignmentOffset, args.noMicroFusion, args.noMacroFusion)
    if not instructions:
       print('no instructions found')
       exit(1)
 
    computeUopProperties(instructions)
-   adjustLatenciesAndAddMergeUops(instructions)
+   adjustLatenciesAndAddMergeUops(instructions, uArchConfig)
 
    clock = 0
 
    retireQueue = deque()
-   rb = ReorderBuffer(retireQueue)
-   scheduler = Scheduler()
+   rb = ReorderBuffer(retireQueue, uArchConfig)
+   scheduler = Scheduler(uArchConfig)
 
    perfEvents: Dict[int, Dict[str, int]] = {}
 
    unroll = (not instructions[-1].isBranchInstr)
-   frontEnd = FrontEnd(instructions, rb, scheduler, unroll, args.alignmentOffset, args.initPolicy, perfEvents, args.simpleFrontEnd)
+   frontEnd = FrontEnd(instructions, rb, scheduler, uArchConfig, unroll, args.alignmentOffset, args.initPolicy, perfEvents, args.simpleFrontEnd)
 
    uopsForRound = []
    rnd = 0
@@ -2348,22 +2355,22 @@ def main():
          url = getURL(instr.instrStr)
       tableLineData.append(TableLineData(instr.asm, instr, url, uops))
 
-   bottlenecks = getBottlenecks(TP, perfEvents, relevantInstrInstances, lastRelevantRound - firstRelevantRound + 1)
+   bottlenecks = getBottlenecks(TP, perfEvents, relevantInstrInstances, uArchConfig, lastRelevantRound - firstRelevantRound + 1)
    if bottlenecks:
       print('Bottleneck' + ('s' if len(bottlenecks) > 1 else '') + ': ' + ', '.join(sorted(bottlenecks)))
 
    print('')
-   printUopsTable(tableLineData)
+   printUopsTable(tableLineData, uArchConfig)
 
    if args.trace is not None:
       #ToDo: use TableLineData instead
       generateHTMLTraceTable(args.trace, instructions, frontEnd.allGeneratedInstrInstances, lastRelevantRound, clock-1)
 
    if args.graph is not None:
-      generateHTMLGraph(args.graph, instructions, frontEnd.allGeneratedInstrInstances, clock-1)
+      generateHTMLGraph(args.graph, instructions, frontEnd.allGeneratedInstrInstances, uArchConfig, clock-1)
 
    if args.json is not None:
-      generateJSONOutput(args.json, instructions, frontEnd, clock-1)
+      generateJSONOutput(args.json, instructions, frontEnd, uArchConfig, clock-1)
 
 if __name__ == "__main__":
     main()
