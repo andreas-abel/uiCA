@@ -16,7 +16,6 @@ from x64_lib import *
 from microArchConfigs import MicroArchConfig, MicroArchConfigs
 
 
-clock = 0
 uArchConfig: MicroArchConfig
 
 class UopProperties:
@@ -510,7 +509,7 @@ class FrontEnd:
             if self.alignmentOffset in self.addressesInDSB:
                self.uopSource = 'DSB'
 
-   def cycle(self):
+   def cycle(self, clock):
       issueUops = []
       if not self.reorderBuffer.isFull() and not self.scheduler.isFull(): # len(self.IDQ) >= uArchConfig.issueWidth and the first check seems to be wrong, but leads to better results
          issueUops = self.renamer.cycle()
@@ -518,8 +517,8 @@ class FrontEnd:
       for fusedUop in issueUops:
          fusedUop.issued = clock
 
-      self.reorderBuffer.cycle(issueUops)
-      self.scheduler.cycle(issueUops)
+      self.reorderBuffer.cycle(clock, issueUops)
+      self.scheduler.cycle(clock, issueUops)
 
       if self.reorderBuffer.isFull():
          self.perfEvents.setdefault(clock, {})['RBFull'] = 1
@@ -537,7 +536,7 @@ class FrontEnd:
             for instrI in next(self.cacheBlockGenerator):
                self.allGeneratedInstrInstances.append(instrI)
                for lamUop in instrI.uops:
-                  self.addStackSyncUop(lamUop.getUnfusedUops()[0])
+                  self.addStackSyncUop(clock, lamUop.getUnfusedUops()[0])
                   for uop in lamUop.getUnfusedUops():
                      self.IDQ.append(LaminatedUop([FusedUop([uop])]))
       elif self.uopSource == 'LSD':
@@ -559,8 +558,8 @@ class FrontEnd:
          if self.MS.isBusy():
             newUops = self.MS.cycle()
          elif self.uopSource == 'MITE':
-            self.preDecoder.cycle()
-            newInstrIUops = self.decoder.cycle()
+            self.preDecoder.cycle(clock)
+            newInstrIUops = self.decoder.cycle(clock)
             newUops = [u for _, u in newInstrIUops if u is not None]
             if not self.unroll and newInstrIUops:
                curInstrI = newInstrIUops[-1][0]
@@ -580,7 +579,7 @@ class FrontEnd:
                   self.uopSource = 'MITE'
 
          for lamUop in newUops:
-            self.addStackSyncUop(lamUop.getUnfusedUops()[0])
+            self.addStackSyncUop(clock, lamUop.getUnfusedUops()[0])
             self.IDQ.append(lamUop)
             lamUop.addedToIDQ = clock
 
@@ -702,7 +701,7 @@ class FrontEnd:
                      # branch instr. ends in next block
                      self.preDecoder.B16BlockQueue.append(deque())
 
-   def addStackSyncUop(self, uop):
+   def addStackSyncUop(self, clock, uop):
       if not uop.prop.isFirstUopOfInstr:
          return
 
@@ -836,7 +835,7 @@ class Decoder:
       self.instructionQueue = instructionQueue
       self.MS = MS
 
-   def cycle(self):
+   def cycle(self, clock):
       uopsList = []
       nDecodedInstrs = 0
       remainingDecoderSlots = uArchConfig.nDecoders
@@ -893,7 +892,7 @@ class PreDecoder:
       self.stalled = 0
       self.partialInstrI = None
 
-   def cycle(self):
+   def cycle(self, clock):
       if not self.stalled:
          if ((not self.preDecQueue) and (self.B16BlockQueue or self.partialInstrI)
                                        and len(self.instructionQueue) + uArchConfig.preDecodeWidth <= uArchConfig.IQWidth):
@@ -944,11 +943,11 @@ class ReorderBuffer:
    def isFull(self):
       return len(self.uops) + uArchConfig.issueWidth > uArchConfig.RBWidth
 
-   def cycle(self, newUops):
-      self.retireUops()
-      self.addUops(newUops)
+   def cycle(self, clock, newUops):
+      self.retireUops(clock)
+      self.addUops(clock, newUops)
 
-   def retireUops(self):
+   def retireUops(self, clock):
       nRetiredInSameCycle = 0
       for _ in range(0, uArchConfig.retireWidth):
          if not self.uops: break
@@ -963,7 +962,7 @@ class ReorderBuffer:
          else:
             break
 
-   def addUops(self, newUops):
+   def addUops(self, clock, newUops):
       for fusedUop in newUops:
          self.uops.append(fusedUop)
          for uop in fusedUop.getUnfusedUops():
@@ -996,7 +995,7 @@ class Scheduler:
    def isFull(self):
       return len(self.uops) + uArchConfig.issueWidth > uArchConfig.RSWidth
 
-   def cycle(self, newUops):
+   def cycle(self, clock, newUops):
       self.divBusy = max(0, self.divBusy-1)
       if clock in self.uopsReadyInCycle:
          for uop in self.uopsReadyInCycle[clock]:
@@ -1006,14 +1005,14 @@ class Scheduler:
                heappush(self.readyQueue[uop.actualPort], (uop.idx, uop))
          del self.uopsReadyInCycle[clock]
 
-      self.addNewUops(newUops)
-      self.dispatchUops()
+      self.addNewUops(clock, newUops)
+      self.dispatchUops(clock)
       self.processPendingUops()
-      self.processNonReadyUops()
-      self.processPendingFences()
+      self.processNonReadyUops(clock)
+      self.processPendingFences(clock)
       self.updateBlockedResources()
 
-   def dispatchUops(self):
+   def dispatchUops(self, clock):
       applicablePorts = list(uArchConfig.allPorts)
 
       if ('4' in applicablePorts) and ('9' in applicablePorts) and self.readyQueue['4'] and self.readyQueue['9']:
@@ -1080,7 +1079,7 @@ class Scheduler:
          self.pendingUops.remove(uop)
          uop.executed = finishTime
 
-   def processPendingFences(self):
+   def processPendingFences(self, clock):
       for queue, uopsSinceLastFence in [(self.pendingLoadFenceUops, self.loadUopsSinceLastLoadFence),
                                         (self.pendingStoreFenceUops, self.storeUopsSinceLastStoreFence)]:
          if queue:
@@ -1090,10 +1089,10 @@ class Scheduler:
                del uopsSinceLastFence[:]
 
 
-   def processNonReadyUops(self):
+   def processNonReadyUops(self, clock):
       newReadyUops = set()
       for uop in self.nonReadyUops:
-         if self.checkUopReady(uop):
+         if self.checkUopReady(clock, uop):
             newReadyUops.add(uop)
       self.nonReadyUops = [u for u in self.nonReadyUops if (u not in newReadyUops)]
 
@@ -1103,7 +1102,7 @@ class Scheduler:
          self.blockedResources[r] = max(0, self.blockedResources[r] - 1)
 
    # adds ready uops to self.uopsReadyInCycle
-   def checkUopReady(self, uop):
+   def checkUopReady(self, clock, uop):
       if uop.readyForDispatch is not None:
          return True
 
@@ -1124,7 +1123,7 @@ class Scheduler:
       if uop.prop.isFirstUopOfInstr and self.blockedResources.get(uop.prop.instr.instrStr, 0) > 0:
          return False
 
-      readyForDispatchCycle = self.getReadyForDispatchCycle(uop)
+      readyForDispatchCycle = self.getReadyForDispatchCycle(clock, uop)
       if readyForDispatchCycle is None:
          return False
 
@@ -1141,8 +1140,7 @@ class Scheduler:
 
       return True
 
-
-   def addNewUops(self, newUops):
+   def addNewUops(self, clock, newUops):
       self.portUsageAtStartOfCycle[clock] = dict(self.portUsage)
       portCombinationsInCurCycle = {}
       for issueSlot, fusedUop in enumerate(newUops):
@@ -1240,7 +1238,7 @@ class Scheduler:
             return
       self.nonReadyUops.append(uop)
 
-   def getReadyForDispatchCycle(self, uop):
+   def getReadyForDispatchCycle(self, clock, uop):
       opReadyCycle = -1
       for renInpOp in uop.renamedInputOperands:
          if renInpOp.getReadyCycle() is None:
@@ -2275,7 +2273,6 @@ def main():
    computeUopProperties(instructions)
    adjustLatenciesAndAddMergeUops(instructions)
 
-   global clock
    clock = 0
 
    retireQueue = deque()
@@ -2290,7 +2287,7 @@ def main():
    uopsForRound = []
    rnd = 0
    while True:
-      frontEnd.cycle()
+      frontEnd.cycle(clock)
       while retireQueue:
          fusedUop = retireQueue.popleft()
 
