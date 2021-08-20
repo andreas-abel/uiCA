@@ -4,8 +4,9 @@ import importlib
 import os
 import re
 from collections import Counter, deque, namedtuple, OrderedDict
+from concurrent import futures
 from heapq import heappop, heappush
-from itertools import count
+from itertools import count, repeat
 from typing import List, Set, Dict, NamedTuple, Optional
 
 import random
@@ -500,7 +501,7 @@ class FrontEnd:
          nUops = sum(len(instrI.uops) for cb in cacheBlocksForFirstRound for instrI in cb)
          if allBlocksCanBeCached and self.uArchConfig.LSDEnabled and allInstrsCanBeUsedByLSD and (nUops <= self.uArchConfig.IDQWidth):
             self.uopSource = 'LSD'
-            self.LSDUnrollCount = self.uArchConfig.LSDUnrolling(nUops)
+            self.LSDUnrollCount = self.uArchConfig.LSDUnrolling.get(nUops, 1)
             for cacheBlock in cacheBlocksForFirstRound + [cb for _ in range(0, self.LSDUnrollCount-1) for cb in next(self.cacheBlocksForNextRoundGenerator)]:
                self.addNewCacheBlock(cacheBlock)
          else:
@@ -1453,7 +1454,7 @@ def computeUopProperties(instructions):
       instr.UopPropertiesList[-1].isLastUopOfInstr = True
 
 
-def getInstructions(filename, rawFile, uArchConfig: MicroArchConfig, iacaMarkers, archData, alignmentOffset, noMicroFusion=False, noMacroFusion=False):
+def getXedDisas(filename, rawFile, uArchConfig: MicroArchConfig, iacaMarkers):
    xedBinary = os.path.join(os.path.dirname(os.path.realpath(__file__)), 'xed')
    output = subprocess.check_output([xedBinary, '-64', '-v', '4', '-isa-set', '-chip-check', uArchConfig.XEDName,
                                      ('-ir' if rawFile else '-i'), filename], stderr=subprocess.DEVNULL).decode()
@@ -1461,10 +1462,12 @@ def getInstructions(filename, rawFile, uArchConfig: MicroArchConfig, iacaMarkers
       print('\n'.join(l for l in output.splitlines() if 'ERROR: GENERAL_ERROR Could not decode at offset:' in l))
       exit(1)
 
-   disas = parseXedOutput(output, iacaMarkers)
-   zmmRegistersInUse = any(('ZMM' in reg) for instrD in disas for reg in instrD.regOperands.values())
+   return parseXedOutput(output, iacaMarkers)
 
+
+def getInstructions(disas: List[InstrDisas], uArchConfig: MicroArchConfig, archData, alignmentOffset, noMicroFusion=False, noMacroFusion=False):
    instructions: List[Instr] = []
+   zmmRegistersInUse = any(('ZMM' in reg) for instrD in disas for reg in instrD.regOperands.values())
    for instrD in disas:
       usedRegs = [getCanonicalReg(r) for _, r in instrD.regOperands.items() if r in GPRegs or 'MM' in r]
       sameReg = (len(usedRegs) > 1 and len(set(usedRegs)) == 1)
@@ -2239,40 +2242,10 @@ def getURL(instrStr):
    return 'https://www.uops.info/html-instr/' + canonicalizeInstrString(instrStr) + '.html'
 
 
-# Disassembles a binary and finds for each instruction the corresponding entry in the XML file.
-# With the -iacaMarkers option, only the parts of the code that are between the IACA markers are considered.
-def main():
-   parser = argparse.ArgumentParser(description='Disassembler')
-   parser.add_argument('filename', help='File to be disassembled')
-   parser.add_argument('-iacaMarkers', help='Use IACA markers', action='store_true')
-   parser.add_argument('-raw', help='raw file', action='store_true')
-   parser.add_argument('-arch', help='Microarchitecture', default='SKL')
-   parser.add_argument('-trace', help='HTML trace', nargs='?', const='trace.html')
-   parser.add_argument('-graph', help='HTML graph', nargs='?', const='graph.html')
-   parser.add_argument('-TPonly', help='Output only the TP prediction', nargs='?', const='graph.html')
-   parser.add_argument('-simpleFrontEnd', help='Simulate a simple front end that is only limited by the issue width', action='store_true')
-   parser.add_argument('-noMicroFusion', help='Variant that does not support micro-fusion', action='store_true')
-   parser.add_argument('-noMacroFusion', help='Variant that does not support macro-fusion', action='store_true')
-   parser.add_argument('-alignmentOffset', help='Alignment offset (relative to a 64-Byte cache line)', type=int, default=0)
-   parser.add_argument('-json', help='JSON output', nargs='?', const='result.json')
-   parser.add_argument('-initPolicy', help='Initial register state; '
-                                           'options: "diff" (all registers initially have different values), '
-                                           '"same" (they all have the same value), '
-                                           '"stack" (they all have the same value, except for the stack and base pointers); '
-                                           'default: "diff"', default='diff')
-   args = parser.parse_args()
-
-   if not args.arch in MicroArchConfigs:
-      print('Unsupported microarchitecture')
-      exit(1)
-   if not args.initPolicy in ['diff', 'same', 'stack']:
-      print('Unsupported -initPolicy')
-      exit(1)
-
-   uArchConfig = MicroArchConfigs[args.arch]
-
-   instructions = getInstructions(args.filename, args.raw, uArchConfig, args.iacaMarkers, importlib.import_module('instrData.'+uArchConfig.name),
-                                  args.alignmentOffset, args.noMicroFusion, args.noMacroFusion)
+# Returns the throughput
+def runSimulation(disas: List[InstrDisas], uArchConfig: MicroArchConfig, alignmentOffset, initPolicy, noMicroFusion, noMacroFusion, simpleFrontEnd,
+                  printDetails=False, traceFile=None, graphFile=None, jsonFile=None):
+   instructions = getInstructions(disas, uArchConfig, importlib.import_module('instrData.'+uArchConfig.name), alignmentOffset, noMicroFusion, noMacroFusion)
    if not instructions:
       print('no instructions found')
       exit(1)
@@ -2280,36 +2253,30 @@ def main():
    computeUopProperties(instructions)
    adjustLatenciesAndAddMergeUops(instructions, uArchConfig)
 
-   clock = 0
-
    retireQueue = deque()
    rb = ReorderBuffer(retireQueue, uArchConfig)
    scheduler = Scheduler(uArchConfig)
 
    perfEvents: Dict[int, Dict[str, int]] = {}
-
    unroll = (not instructions[-1].isBranchInstr)
-   frontEnd = FrontEnd(instructions, rb, scheduler, uArchConfig, unroll, args.alignmentOffset, args.initPolicy, perfEvents, args.simpleFrontEnd)
+   frontEnd = FrontEnd(instructions, rb, scheduler, uArchConfig, unroll, alignmentOffset, initPolicy, perfEvents, simpleFrontEnd)
 
-   uopsForRound = []
+   clock = 0
    rnd = 0
+   uopsForRound = []
    while True:
       frontEnd.cycle(clock)
       while retireQueue:
          fusedUop = retireQueue.popleft()
-
          for uop in fusedUop.getUnfusedUops():
             instr = uop.prop.instr
             rnd = uop.instrI.rnd
-
             if rnd >= len(uopsForRound):
                uopsForRound.append({instr: [] for instr in instructions})
             uopsForRound[rnd][instr].append(fusedUop)
             break
-
       if rnd >= 10 and clock > 500:
          break
-
       clock += 1
 
    lastApplicableInstr = [instr for instr in instructions if not instr.macroFusedWithPrevInstr][-1] # ignore macro-fused instr.
@@ -2323,54 +2290,133 @@ def main():
 
    uopsForRelRound = uopsForRound[firstRelevantRound:(lastRelevantRound+1)]
 
-   TP = float(uopsForRelRound[-1][lastApplicableInstr][-1].retired
-                 - uopsForRelRound[0][lastApplicableInstr][-1].retired) / (len(uopsForRelRound)-1)
+   TP = round((uopsForRelRound[-1][lastApplicableInstr][-1].retired - uopsForRelRound[0][lastApplicableInstr][-1].retired) / (len(uopsForRelRound)-1), 2)
 
-   if args.TPonly:
-      print('{:.2f}'.format(TP))
+   if printDetails:
+      print('Throughput (in cycles per iteration): {:.2f}'.format(TP))
+
+      relevantInstrInstances = []
+      relevantInstrInstancesForInstr = {instr: [] for instr in instructions}
+      for instrI in frontEnd.allGeneratedInstrInstances:
+         if firstRelevantRound <= instrI.rnd <= lastRelevantRound:
+            relevantInstrInstances.append(instrI)
+            relevantInstrInstancesForInstr[instrI.instr].append(instrI)
+
+      tableLineData = []
+      for instr in instructions:
+         instrInstances = relevantInstrInstancesForInstr[instr]
+         if any(instrI.regMergeUops for instrI in instrInstances):
+            uops = [instrI.regMergeUops for instrI in instrInstances]
+            tableLineData.append(TableLineData('<Register Merge Uop>', None, None, uops))
+         if any(instrI.stackSyncUops for instrI in instrInstances):
+            uops = [instrI.stackSyncUops for instrI in instrInstances]
+            tableLineData.append(TableLineData('<Stack Sync Uop>', None, None, uops))
+
+         uops = [instrI.uops for instrI in instrInstances]
+         url = None
+         if not isinstance(instr, UnknownInstr):
+            url = getURL(instr.instrStr)
+         tableLineData.append(TableLineData(instr.asm, instr, url, uops))
+
+      bottlenecks = getBottlenecks(TP, perfEvents, relevantInstrInstances, uArchConfig, lastRelevantRound - firstRelevantRound + 1)
+      if bottlenecks:
+         print('Bottleneck' + ('s' if len(bottlenecks) > 1 else '') + ': ' + ', '.join(sorted(bottlenecks)))
+
+      print('')
+      printUopsTable(tableLineData, uArchConfig)
+
+   if traceFile is not None:
+      #ToDo: use TableLineData instead
+      generateHTMLTraceTable(traceFile, instructions, frontEnd.allGeneratedInstrInstances, lastRelevantRound, clock-1)
+
+   if graphFile is not None:
+      generateHTMLGraph(graphFile, instructions, frontEnd.allGeneratedInstrInstances, uArchConfig, clock-1)
+
+   if jsonFile is not None:
+      generateJSONOutput(jsonFile, instructions, frontEnd, uArchConfig, clock-1)
+
+   return TP
+
+
+# Disassembles a binary and finds for each instruction the corresponding entry in the XML file.
+# With the -iacaMarkers option, only the parts of the code that are between the IACA markers are considered.
+def main():
+   allMicroArchs = sorted(m for m in MicroArchConfigs if not '_' in m)
+
+   parser = argparse.ArgumentParser(description='Disassembler')
+   parser.add_argument('filename', help='File to be disassembled')
+   parser.add_argument('-iacaMarkers', help='Use IACA markers', action='store_true')
+   parser.add_argument('-raw', help='raw file', action='store_true')
+   parser.add_argument('-arch', help='Microarchitecture; Possible values: all, ' + ', '.join(allMicroArchs), default='all')
+   parser.add_argument('-trace', help='HTML trace', nargs='?', const='trace.html')
+   parser.add_argument('-graph', help='HTML graph', nargs='?', const='graph.html')
+   parser.add_argument('-TPonly', help='Output only the TP prediction', nargs='?', const='graph.html')
+   parser.add_argument('-simpleFrontEnd', help='Simulate a simple front end that is only limited by the issue width', action='store_true')
+   parser.add_argument('-noMicroFusion', help='Variant that does not support micro-fusion', action='store_true')
+   parser.add_argument('-noMacroFusion', help='Variant that does not support macro-fusion', action='store_true')
+   parser.add_argument('-alignmentOffset', help='Alignment offset (relative to a 64-Byte cache line), or "all"; default: 0', default='0')
+   parser.add_argument('-json', help='JSON output', nargs='?', const='result.json')
+   parser.add_argument('-initPolicy', help='Initial register state; '
+                                           'options: "diff" (all registers initially have different values), '
+                                           '"same" (they all have the same value), '
+                                           '"stack" (they all have the same value, except for the stack and base pointers); '
+                                           'default: "diff"', default='diff')
+   args = parser.parse_args()
+
+   if not args.arch in list(MicroArchConfigs) + ['all']:
+      print('Unsupported microarchitecture')
+      exit(1)
+   if not args.initPolicy in ['diff', 'same', 'stack']:
+      print('Unsupported -initPolicy')
+      exit(1)
+
+   if args.arch == 'all':
+      if args.TPonly or args.trace or args.graph or args.json or (args.alignmentOffset == 'all'):
+         print('Unsupported parameter combination')
+         exit(1)
+      disasList = [getXedDisas(args.filename, args.raw, MicroArchConfigs[uArch], args.iacaMarkers) for uArch in allMicroArchs]
+      uArchConfigsList = [MicroArchConfigs[uArch] for uArch in allMicroArchs]
+      with futures.ProcessPoolExecutor() as executor:
+         TPList = list(executor.map(runSimulation, disasList, uArchConfigsList, repeat(int(args.alignmentOffset)), repeat(args.initPolicy),
+                                                   repeat(args.noMicroFusion), repeat(args.noMacroFusion), repeat(args.simpleFrontEnd)))
+      TPDict = {}
+      for uArch, TP in zip(allMicroArchs, TPList):
+         TPDict.setdefault(TP, []).append(str(uArch))
+      if len(TPDict.keys()) == 1:
+         print('Throughput (in cycles per iteration): {:.2f}'.format(next(iter(TPDict))))
+      else:
+         print('Throughput (in cycles per iteration): {:.2f} - {:.2f}\n'.format(min(TPDict), max(TPDict)))
+         for TP, alList in sorted(TPDict.items()):
+            print('    - {:.2f} on {}'.format(TP, ', '.join(alList)))
+         print()
       exit(0)
 
-   print('Throughput: {:.2f}'.format(TP))
+   uArchConfig = MicroArchConfigs[args.arch]
+   disas = getXedDisas(args.filename, args.raw, uArchConfig, args.iacaMarkers)
+   if args.alignmentOffset == 'all':
+      if args.TPonly or args.trace or args.graph or args.json:
+         print('Unsupported parameter combination')
+         exit(1)
+      with futures.ProcessPoolExecutor() as executor:
+         TPList = list(executor.map(runSimulation, repeat(disas), repeat(uArchConfig), range(0,64), repeat(args.initPolicy), repeat(args.noMicroFusion),
+                                                   repeat(args.noMacroFusion), repeat(args.simpleFrontEnd)))
+      TPDict = {}
+      for al, TP in enumerate(TPList):
+         TPDict.setdefault(TP, []).append(str(al))
+      if len(TPDict.keys()) == 1:
+         print('Throughput (in cycles per iteration): {:.2f}'.format(next(iter(TPDict))))
+      else:
+         print('Throughput (in cycles per iteration): {:.2f} - {:.2f}\n'.format(min(TPDict), max(TPDict)))
+         sortedTP = sorted(TPDict.items(), key=lambda x: len(x[1]))
+         for TP, alList in sortedTP[:-1]:
+            print('    - {:.2f} for alignment offsets in {{{}}}'.format(TP, ', '.join(alList)))
+         print('    - {:.2f} otherwise\n'.format(sortedTP[-1][0], sortedTP[-1][1]))
+   else:
+      TP = runSimulation(disas, uArchConfig, int(args.alignmentOffset), args.initPolicy, args.noMicroFusion, args.noMacroFusion, args.simpleFrontEnd,
+                    not args.TPonly, args.trace, args.graph, args.json)
+      if args.TPonly:
+         print('{:.2f}'.format(TP))
 
-   relevantInstrInstances = []
-   relevantInstrInstancesForInstr = {instr: [] for instr in instructions}
-   for instrI in frontEnd.allGeneratedInstrInstances:
-      if firstRelevantRound <= instrI.rnd <= lastRelevantRound:
-         relevantInstrInstances.append(instrI)
-         relevantInstrInstancesForInstr[instrI.instr].append(instrI)
-
-   tableLineData = []
-   for instr in instructions:
-      instrInstances = relevantInstrInstancesForInstr[instr]
-      if any(instrI.regMergeUops for instrI in instrInstances):
-         uops = [instrI.regMergeUops for instrI in instrInstances]
-         tableLineData.append(TableLineData('<Register Merge Uop>', None, None, uops))
-      if any(instrI.stackSyncUops for instrI in instrInstances):
-         uops = [instrI.stackSyncUops for instrI in instrInstances]
-         tableLineData.append(TableLineData('<Stack Sync Uop>', None, None, uops))
-
-      uops = [instrI.uops for instrI in instrInstances]
-      url = None
-      if not isinstance(instr, UnknownInstr):
-         url = getURL(instr.instrStr)
-      tableLineData.append(TableLineData(instr.asm, instr, url, uops))
-
-   bottlenecks = getBottlenecks(TP, perfEvents, relevantInstrInstances, uArchConfig, lastRelevantRound - firstRelevantRound + 1)
-   if bottlenecks:
-      print('Bottleneck' + ('s' if len(bottlenecks) > 1 else '') + ': ' + ', '.join(sorted(bottlenecks)))
-
-   print('')
-   printUopsTable(tableLineData, uArchConfig)
-
-   if args.trace is not None:
-      #ToDo: use TableLineData instead
-      generateHTMLTraceTable(args.trace, instructions, frontEnd.allGeneratedInstrInstances, lastRelevantRound, clock-1)
-
-   if args.graph is not None:
-      generateHTMLGraph(args.graph, instructions, frontEnd.allGeneratedInstrInstances, uArchConfig, clock-1)
-
-   if args.json is not None:
-      generateJSONOutput(args.json, instructions, frontEnd, uArchConfig, clock-1)
 
 if __name__ == "__main__":
     main()

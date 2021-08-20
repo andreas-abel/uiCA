@@ -6,7 +6,7 @@ class MicroArchConfig:
                 macroFusibleInstrCanBeDecodedAsLastInstr, branchCanBeLastInstrInCachedBlock, stackSyncUopPorts, both32ByteBlocksMustBeCacheable=False,
                 nDecoders=4, preDecodeWidth=5, predecodeDecodeDelay=3, issueDispatchDelay=5, DSB_MS_Stall=4, pop5CEndsDecodeGroup=True,
                 movzxHigh8AliasCanBeEliminated=True, moveEliminationPipelineLength=2, moveEliminationGPRSlots=4, moveEliminationSIMDSlots=4,
-                moveEliminationGPRAllAliasesMustBeOverwritten=True, LSDEnabled=True, LSDUnrolling=lambda x:1, fastPointerChasing=True, DSBBlockSize=32,
+                moveEliminationGPRAllAliasesMustBeOverwritten=True, LSDEnabled=True, LSDUnrolling={}, fastPointerChasing=True, DSBBlockSize=32,
                 simplePortAssignment=False):
       self.name = name
       self.XEDName = XEDName # see obj/wkit/bin/xed -chip-check-list
@@ -80,7 +80,8 @@ MicroArchConfigs['CLX'] = copy.deepcopy(MicroArchConfigs['SKL'])
 MicroArchConfigs['CLX'].name = 'CLX'
 MicroArchConfigs['CLX'].XEDName = 'CASCADE_LAKE'
 MicroArchConfigs['CLX'].LSDEnabled = True
-MicroArchConfigs['CLX'].LSDUnrolling = lambda x: {1:2,2:2,3:6,5:6,6:2,7:3,9:3,10:3,11:3,13:3}.get(x) or (2 if 13<=x<=25 else 1)
+MicroArchConfigs['CLX'].LSDUnrolling = {1:2, 2:2, 3:6, 4:6, 5:6, 6:2, 7:3, 8:3, 9:3, 10:3, 11:3, 12:3, 13:3, 14:2, 15:2, 16:2, 17:2, 18:2, 19:2, 20:2,
+                                        21:2, 22:2, 23:2, 24:2, 25:2, 26: 2, 27:2, 28:2}
 
 MicroArchConfigs['HSW'] = MicroArchConfig( # https://en.wikichip.org/wiki/intel/microarchitectures/haswell_(client)#Core
    name = 'HSW',
@@ -102,7 +103,8 @@ MicroArchConfigs['HSW'] = MicroArchConfig( # https://en.wikichip.org/wiki/intel/
    movzxHigh8AliasCanBeEliminated = False,
    moveEliminationPipelineLength = 2,
    DSB_MS_Stall = 4,
-   LSDUnrolling = lambda x: {1:8,2:8,3:8,4:8,5:6,6:5,7:4,9:3,10:3,11:3}.get(x) or (2 if 13<=x<=27 else 1)
+   LSDUnrolling = {1:8, 2:8, 3:8, 4:8, 5:6, 6:5, 7:4, 8:4, 9:3, 10:3, 11:3, 12:3, 13:2, 14:2, 15:2, 16: 2, 17:2, 18:2, 19:2,
+                   20: 2, 21:2, 22:2, 23:2, 24:2, 25:2, 26:2, 27:2, 28: 2}
 )
 
 MicroArchConfigs['BDW'] = copy.deepcopy(MicroArchConfigs['HSW'])
@@ -128,7 +130,7 @@ MicroArchConfigs['IVB'] = MicroArchConfig( # https://en.wikichip.org/wiki/intel/
    both32ByteBlocksMustBeCacheable = False,
    moveEliminationPipelineLength = 3,
    moveEliminationGPRAllAliasesMustBeOverwritten = False,
-   LSDUnrolling = lambda x: 1
+   LSDUnrolling = {}
 )
 
 MicroArchConfigs['SNB'] = copy.deepcopy(MicroArchConfigs['IVB'])
@@ -157,7 +159,8 @@ MicroArchConfigs['ICL'] = MicroArchConfig( # https://en.wikichip.org/wiki/intel/
    fastPointerChasing = False,
    moveEliminationGPRSlots = 0,
    moveEliminationSIMDSlots = 'unlimited',
-   LSDUnrolling = lambda x: {1:6,2:6,3:6,4:6,5:6,6:6,7:4,8:4,9:3,10:3,11:3,12:3}.get(x) or (2 if 13<=x<=30 else 1),
+   LSDUnrolling = {1:6, 2:6, 3:6, 4:6, 5:6, 6:6, 7:4, 8:4, 9:3, 10:3, 11:3, 12:3, 13:2, 14:2, 15:2, 16:2, 17:2, 18:2, 19:2,
+                   20:2, 21:2, 22:2, 23:2, 24:2, 25:2, 26:2, 27:2, 28:2, 29:2, 30:2},
    DSBBlockSize = 64
 )
 
@@ -173,7 +176,7 @@ MicroArchConfigs['CLX_SimplePorts'] = copy.deepcopy(MicroArchConfigs['CLX'])
 MicroArchConfigs['CLX_SimplePorts'].simplePortAssignment = True
 
 MicroArchConfigs['CLX_noLSDUnrolling'] = copy.deepcopy(MicroArchConfigs['CLX'])
-MicroArchConfigs['CLX_noLSDUnrolling'].LSDUnrolling = lambda x: 1
+MicroArchConfigs['CLX_noLSDUnrolling'].LSDUnrolling = {}
 
 MicroArchConfigs['CLX_noMoveElim'] = copy.deepcopy(MicroArchConfigs['CLX'])
 MicroArchConfigs['CLX_noMoveElim'].moveEliminationGPRSlots = 0

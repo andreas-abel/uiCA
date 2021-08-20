@@ -61,12 +61,12 @@ The following parameters are optional. Parameter names may be abbreviated if the
 
 | Option                       | Description |
 |------------------------------|-------------|
-| `-arch`                  | The microarchitecture of the simulated CPU. Available options: `SNB`, `IVB`, `HSW`, `BDW`, `SKL`, `SKX`, `KBL`, `CFL`, `CLX`, `ICL`, `TGL`, `RKL`.  `[Default: SKL]` |
+| `-arch`                  | The microarchitecture of the simulated CPU. Available microarchitectures: `SNB`, `IVB`, `HSW`, `BDW`, `SKL`, `SKX`, `KBL`, `CFL`, `CLX`, `ICL`, `TGL`, `RKL`. Alternatively, you can use `all` to get an overview of the throughputs for all supported microarchitectures.  `[Default: all]` |
 | `-iacaMarkers`           | Analyze only the code that is between the `IACA_START` and `IACA_END` markers of Intel's [IACA](https://software.intel.com/content/www/us/en/develop/articles/intel-architecture-code-analyzer.html) tool. |
 | `-raw`                   | Analyze a file that directly contains the machine code of the benchmark, but no headers or other data. |
 | `-trace <filename.html>` | Generate an HTML file that contains a table with a cycle-by-cycle view of how the instructions are executed. |
 | `-graph <filename.html>` | Generate an HTML file that contains a graph with various performance-related events.  |
-| `-alignmentOffset`       | Alignment offset (relative to a 64-Byte cache line). `[Default: 0]` |
+| `-alignmentOffset`       | Alignment offset (relative to a 64-Byte cache line). The option `all` provides an overview of the throughputs for all possible alignment offsets. `[Default: 0]` |
 | `-TPonly`                | Output only the throughput prediction. |
 | `-simpleFrontEnd`        | Simulate a simple front end that is only limited by the issue width. |
 | `-noMicroFusion`         | Simulate a CPU variant that does not support micro-fusion. |
