@@ -6,7 +6,7 @@ cd XED-to-XML
 cp obj/wkit/bin/xed ..
 cp disas.py ..
 cd ..
-git submodule deinit --all
+git submodule deinit -f --all
 rm -rf .git/modules/*
 
 wget https://www.uops.info/instructions.xml || exit 1
