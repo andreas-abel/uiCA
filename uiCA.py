@@ -47,8 +47,8 @@ class Uop:
       self.fusedUop: Optional[FusedUop] = None # fused-domain uop that contains this uop
       self.actualPort = None
       self.eliminated = False
-      self.renamedInputOperands = [] # [op[1] for op in inputOperands] # [(instrInputOperand, renamedInpOperand), ...]
-      self.renamedOutputOperands = [] # [op[1] for op in outputOperands]
+      self.renamedInputOperands: List[RenamedOperand] = []
+      self.renamedOutputOperands: List[RenamedOperand] = []
       self.storeBufferEntry = None
       self.readyForDispatch = None
       self.dispatched = None
@@ -2150,6 +2150,7 @@ def generateJSONOutput(filename, instructions: List[Instr], frontEnd: FrontEnd, 
       'uArchName': uArchConfig.name,
       'IQWidth': uArchConfig.IQWidth,
       'IDQWidth': uArchConfig.IDQWidth,
+      'issueWidth': uArchConfig.issueWidth,
       'RBWidth': uArchConfig.RBWidth,
       'RSWidth': uArchConfig.RSWidth,
       'allPorts': uArchConfig.allPorts,
@@ -2178,6 +2179,7 @@ def generateJSONOutput(filename, instructions: List[Instr], frontEnd: FrontEnd, 
             break
       instrList.append(instrDict)
 
+   unfusedUopToDict = {}
    cycles = [{'cycle': i} for i in range(0, maxCycle+1)]
    for instrI in frontEnd.allGeneratedInstrInstances:
       instrID = instrToID[instrI.instr]
@@ -2218,9 +2220,15 @@ def generateJSONOutput(filename, instructions: List[Instr], frontEnd: FrontEnd, 
             for uopI, uop in enumerate(fUop.getUnfusedUops()):
                unfusedUopDict = fUopDict.copy()
                unfusedUopDict['uopID'] = uopI
+               unfusedUopToDict[uop] = unfusedUopDict
 
                if (fUop.issued is not None) and (fUop.issued <= maxCycle) and (fUop.issued != uop.executed):
-                  cycles[fUop.issued].setdefault('addedToRS', []).append(unfusedUopDict)
+                  rsDict = unfusedUopDict.copy()
+                  rsDict['dependsOn'] = []
+                  for renOp in uop.renamedInputOperands:
+                     if renOp.uop in unfusedUopToDict:
+                        rsDict['dependsOn'].append(unfusedUopToDict[renOp.uop])
+                  cycles[fUop.issued].setdefault('addedToRS', []).append(rsDict)
                if (uop.readyForDispatch is not None) and (uop.readyForDispatch <= maxCycle):
                   cycles[uop.readyForDispatch].setdefault('readyForDispatch', []).append(unfusedUopDict)
                if (uop.dispatched is not None) and (uop.dispatched <= maxCycle):
