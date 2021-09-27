@@ -894,6 +894,8 @@ class PreDecoder:
       self.uArchConfig = uArchConfig
       self.B16BlockQueue = deque() # a deque of 16 Byte blocks (i.e., deques of InstrInstances)
       self.instructionQueue = instructionQueue
+      self.curBlock = None
+      self.nonStalledPredecCyclesForCurBlock = 0
       self.preDecQueue = deque() # instructions are queued here before they are added to the instruction queue after all stalls have been resolved
       self.stalled = 0
       self.partialInstrI = None
@@ -906,26 +908,27 @@ class PreDecoder:
                self.preDecQueue.append(self.partialInstrI)
                self.partialInstrI = None
 
-            if self.B16BlockQueue:
-               curBlock = self.B16BlockQueue[0]
+            if not self.curBlock:
+               if not self.B16BlockQueue:
+                  return
+               self.curBlock = self.B16BlockQueue.popleft()
+               self.stalled = max(0, sum(3 for ii in self.curBlock if ii.instr.lcpStall) - max(0, self.nonStalledPredecCyclesForCurBlock - 1))
+               self.nonStalledPredecCyclesForCurBlock = 0
 
-               while curBlock and len(self.preDecQueue) < self.uArchConfig.preDecodeWidth:
-                  if instrInstanceCrosses16ByteBoundary(curBlock[0]):
-                     break
-                  self.preDecQueue.append(curBlock.popleft())
+            while self.curBlock and len(self.preDecQueue) < self.uArchConfig.preDecodeWidth:
+               if instrInstanceCrosses16ByteBoundary(self.curBlock[0]):
+                  break
+               self.preDecQueue.append(self.curBlock.popleft())
 
-               if len(curBlock) == 1:
-                  instrI = curBlock[0]
-                  if instrInstanceCrosses16ByteBoundary(instrI):
-                     offsetOfNominalOpcode = (instrI.address % 16) + instrI.instr.posNominalOpcode
-                     if (len(self.preDecQueue) < 5) or (offsetOfNominalOpcode >= 16):
-                        self.partialInstrI = instrI
-                        curBlock.popleft()
+            if len(self.curBlock) == 1:
+               instrI = self.curBlock[0]
+               if instrInstanceCrosses16ByteBoundary(instrI):
+                  offsetOfNominalOpcode = (instrI.address % 16) + instrI.instr.posNominalOpcode
+                  if (len(self.preDecQueue) < 5) or (offsetOfNominalOpcode >= 16):
+                     self.partialInstrI = instrI
+                     self.curBlock.popleft()
 
-               if not curBlock:
-                  self.B16BlockQueue.popleft()
-
-            self.stalled = sum(3 for ii in self.preDecQueue if ii.instr.lcpStall)
+            self.nonStalledPredecCyclesForCurBlock += 1
 
          if not self.stalled:
             for instrI in self.preDecQueue:
