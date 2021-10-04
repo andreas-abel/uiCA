@@ -1274,8 +1274,14 @@ def adjustLatenciesAndAddMergeUops(instructions, uArchConfig: MicroArchConfig):
    def processInstrRegOutputs(instr):
       for outOp in instr.outputRegOperands:
          canonicalOutReg = getCanonicalReg(outOp.reg)
-         if instr.mayBeEliminated and instr.instrStr in ['MOV_89 (R64, R64)', 'MOV_8B (R64, R64)']: # ToDo: what if not actually eliminated?
-            prevWriteToReg[canonicalOutReg] = prevWriteToReg.get(getCanonicalReg(instr.inputRegOperands[0].reg), instr)
+         if instr.mayBeEliminated:
+            prevWriteToInp = prevWriteToReg.get(getCanonicalReg(instr.inputRegOperands[0].reg), instr)
+            if ((instr.instrStr in ['MOV_89 (R64, R64)', 'MOV_8B (R64, R64)']) or
+                  ((instr.instrStr in ['MOV_89 (R32, R32)', 'MOV_8B (R32, R32)']) and prevWriteToInp.uops == 0)):
+               # ToDo: what if not actually eliminated?
+               prevWriteToReg[canonicalOutReg] = prevWriteToInp
+            else:
+               prevWriteToReg[canonicalOutReg] = instr
          else:
             prevWriteToReg[canonicalOutReg] = instr
 
@@ -1292,11 +1298,13 @@ def adjustLatenciesAndAddMergeUops(instructions, uArchConfig: MicroArchConfig):
       for uop in instr.UopPropertiesList:
          if uArchConfig.fastPointerChasing and (uop.isLoadUop or uop.isStoreAddressUop):
             memAddr = uop.memAddr
-            if (memAddr is not None) and (memAddr.base is not None) and (memAddr.index is None) and (0 <= memAddr.displacement < 2048):
+            if (memAddr is not None) and (memAddr.base is not None) and (0 <= memAddr.displacement < 2048):
                canonicalBaseReg = getCanonicalReg(memAddr.base)
-               if (canonicalBaseReg in prevWriteToReg) and (prevWriteToReg[canonicalBaseReg].instrStr in ['MOV (R64, M64)', 'MOV (RAX, M64)',
+               canonicalIndexReg = getCanonicalReg(memAddr.index) if memAddr.index else None
+               if ((canonicalBaseReg in prevWriteToReg) and (prevWriteToReg[canonicalBaseReg].instrStr in ['MOV (R64, M64)', 'MOV (RAX, M64)',
                                                                                                           'MOV (R32, M32)', 'MOV (EAX, M32)',
-                                                                                                          'MOVSXD (R64, M32)', 'POP (R64)']):
+                                                                                                          'MOVSXD (R64, M32)', 'POP (R64)'])
+                     and ((canonicalIndexReg is None) or ((canonicalIndexReg in prevWriteToReg) and (prevWriteToReg[canonicalIndexReg].uops == 0)))):
                   for k in list(uop.latencies.keys()):
                      uop.latencies[k] -= 1
 
