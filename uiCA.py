@@ -1285,12 +1285,13 @@ def adjustLatenciesAndAddMergeUops(instructions, uArchConfig: MicroArchConfig):
          else:
             prevWriteToReg[canonicalOutReg] = instr
 
-      for op in instr.inputRegOperands + instr.memAddrOperands + instr.outputRegOperands:
-         canonicalReg = getCanonicalReg(op.reg)
-         if (canonicalReg in ['RAX', 'RBX', 'RCX', 'RDX']) and (getRegSize(op.reg) > 8):
-            high8RegClean[canonicalReg] = True
-         elif (op.reg in High8Regs) and (op in instr.outputRegOperands):
-            high8RegClean[canonicalReg] = False
+      if uArchConfig.high8RenamedSeparately:
+         for op in instr.inputRegOperands + instr.memAddrOperands + instr.outputRegOperands:
+            canonicalReg = getCanonicalReg(op.reg)
+            if (canonicalReg in ['RAX', 'RBX', 'RCX', 'RDX']) and (getRegSize(op.reg) > 8):
+               high8RegClean[canonicalReg] = True
+            elif (op.reg in High8Regs) and (op in instr.outputRegOperands):
+               high8RegClean[canonicalReg] = False
 
    for instr in instructions:
       processInstrRegOutputs(instr)
@@ -1308,17 +1309,19 @@ def adjustLatenciesAndAddMergeUops(instructions, uArchConfig: MicroArchConfig):
                   for k in list(uop.latencies.keys()):
                      uop.latencies[k] -= 1
 
-         if any(high8RegClean[getCanonicalReg(inOp.reg)] for inOp in uop.inputOperands if isinstance(inOp, RegOperand) and (inOp.reg in High8Regs)):
-            for key in list(uop.latencies.keys()):
-               uop.latencies[key] += 1
+      if uArchConfig.high8RenamedSeparately:
+         for uop in instr.UopPropertiesList:
+            if any(high8RegClean[getCanonicalReg(inOp.reg)] for inOp in uop.inputOperands if isinstance(inOp, RegOperand) and (inOp.reg in High8Regs)):
+               for key in list(uop.latencies.keys()):
+                  uop.latencies[key] += 1
 
-      for inOp in instr.inputRegOperands + instr.memAddrOperands:
-         canonicalInReg = getCanonicalReg(inOp.reg)
-         if (canonicalInReg in ['RAX', 'RBX', 'RCX', 'RDX']) and (getRegSize(inOp.reg) > 8) and (not high8RegClean[canonicalInReg]):
-            canonicalInOp = RegOperand(canonicalInReg)
-            canonicalOutOp = RegOperand(canonicalInReg)
-            regMergeUopProp = UopProperties(instr, ['1', '5'], [canonicalInOp], [canonicalOutOp], {canonicalOutOp: 1}, isRegMergeUop=True)
-            instr.regMergeUopPropertiesList.append(regMergeUopProp)
+         for inOp in instr.inputRegOperands + instr.memAddrOperands:
+            canonicalInReg = getCanonicalReg(inOp.reg)
+            if (canonicalInReg in ['RAX', 'RBX', 'RCX', 'RDX']) and (getRegSize(inOp.reg) > 8) and (not high8RegClean[canonicalInReg]):
+               canonicalInOp = RegOperand(canonicalInReg)
+               canonicalOutOp = RegOperand(canonicalInReg)
+               regMergeUopProp = UopProperties(instr, ['1', '5'], [canonicalInOp], [canonicalOutOp], {canonicalOutOp: 1}, isRegMergeUop=True)
+               instr.regMergeUopPropertiesList.append(regMergeUopProp)
 
       processInstrRegOutputs(instr)
 
@@ -1453,6 +1456,9 @@ def computeUopProperties(instructions):
                   nonMemUopProps.appendleft(UopProperties(instr, pc, latClass, [pseudoOp], latDict))
                else:
                   nonMemUopProps.append(UopProperties(instr, pc, nonMemInputOperands, [], {}))
+
+            for latLevel in remainingLatClassLevels:
+               nonMemUopProps[-1].inputOperands.extend(latClasses[latLevel])
 
       # nonMemUopProps need to come after loadUopProps, and storeUopProps after nonMemUopProps because of PseudoOps and micro-fusion
       instr.UopPropertiesList = loadUopProps + list(nonMemUopProps) + storeUopProps

@@ -5,9 +5,9 @@ class MicroArchConfig:
    def __init__(self, name, XEDName, IQWidth, DSBWidth, IDQWidth, issueWidth, RBWidth, RSWidth, retireWidth, allPorts, pop5CRequiresComplexDecoder,
                 macroFusibleInstrCanBeDecodedAsLastInstr, branchCanBeLastInstrInCachedBlock, stackSyncUopPorts, both32ByteBlocksMustBeCacheable=False,
                 nDecoders=4, preDecodeWidth=5, predecodeDecodeDelay=3, issueDispatchDelay=5, DSB_MS_Stall=4, pop5CEndsDecodeGroup=True,
-                movzxHigh8AliasCanBeEliminated=True, moveEliminationPipelineLength=2, moveEliminationGPRSlots=4, moveEliminationSIMDSlots=4,
-                moveEliminationGPRAllAliasesMustBeOverwritten=True, LSDEnabled=True, LSDUnrolling={}, fastPointerChasing=True, DSBBlockSize=32,
-                simplePortAssignment=False):
+                high8RenamedSeparately=True, movzxHigh8AliasCanBeEliminated=True, moveEliminationPipelineLength=2, moveEliminationGPRSlots=4,
+                moveEliminationSIMDSlots=4, moveEliminationGPRAllAliasesMustBeOverwritten=True, LSDEnabled=True, LSDUnrolling={}, fastPointerChasing=True,
+                DSBBlockSize=32, simplePortAssignment=False):
       self.name = name
       self.XEDName = XEDName # see obj/wkit/bin/xed -chip-check-list
       self.IQWidth = IQWidth # width of the instruction queue
@@ -29,6 +29,7 @@ class MicroArchConfig:
       self.issueDispatchDelay = issueDispatchDelay # minimum delay between issuing and dispatching
       self.DSB_MS_Stall = DSB_MS_Stall # number of stall cycles when switching from DSB to MS
       self.pop5CEndsDecodeGroup = pop5CEndsDecodeGroup # after pop rsp and pop r12, no other instr. can be decoded in the same cycle
+      self.high8RenamedSeparately = high8RenamedSeparately # whether the high8 register are renamed separately from the low8 registers
       self.movzxHigh8AliasCanBeEliminated = movzxHigh8AliasCanBeEliminated # whether movzx can be eliminated if the second register has the same encoding as a high8 register
       self.moveEliminationPipelineLength = moveEliminationPipelineLength
       self.moveEliminationGPRSlots = moveEliminationGPRSlots # the number of slots or 'unlimited'
@@ -157,6 +158,8 @@ MicroArchConfigs['ICL'] = MicroArchConfig( # https://en.wikichip.org/wiki/intel/
    LSDEnabled = True,
    DSB_MS_Stall = 2,
    fastPointerChasing = False,
+   high8RenamedSeparately = False,
+   movzxHigh8AliasCanBeEliminated = False,
    moveEliminationGPRSlots = 0,
    moveEliminationSIMDSlots = 'unlimited',
    LSDUnrolling = {1:6, 2:6, 3:6, 4:6, 5:6, 6:6, 7:4, 8:4, 9:3, 10:3, 11:3, 12:3, 13:2, 14:2, 15:2, 16:2, 17:2, 18:2, 19:2,
