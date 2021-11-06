@@ -7,7 +7,7 @@ copy /y disas.py ..
 cd ..
 
 git submodule deinit -f --all
-rd /s /q .git\modules\*
+rd /s /q .git\modules
 
 PowerShell -Command Invoke-WebRequest https://www.uops.info/instructions.xml -OutFile instructions.xml || exit /b
 py convertXML.py instructions.xml || exit /b
