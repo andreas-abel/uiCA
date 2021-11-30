@@ -854,8 +854,8 @@ class Decoder:
             break
          if uopsList and instrI.instr.complexDecoder:
             break
-         if instrI.instr.macroFusibleWith and (not self.uArchConfig.macroFusibleInstrCanBeDecodedAsLastInstr):
-            if nDecodedInstrs == self.uArchConfig.nDecoders-1:
+         if instrI.instr.macroFusibleWith:
+            if (not self.uArchConfig.macroFusibleInstrCanBeDecodedAsLastInstr) and (nDecodedInstrs == self.uArchConfig.nDecoders-1):
                break
             if (len(self.instructionQueue) <= 1) or (self.instructionQueue[1].predecoded + self.uArchConfig.predecodeDecodeDelay > clock):
                break
