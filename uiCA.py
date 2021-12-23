@@ -1509,8 +1509,7 @@ def getInstructions(disas: List[InstrDisas], uArchConfig: MicroArchConfig, archD
 
       instruction = None
       for instrData in archData.instrData.get(instrD.iform, []):
-         attrData = archData.attrData[instrData['attr']]
-         if all(instrD.attributes.get(k, '0') == v for k, v in attrData.items()):
+         if matchAttributes(instrD.attributes, archData.attrData[instrData['attr']]):
             perfData = archData.perfData[instrData['perfData']]
             uops = perfData.get('uops', 0)
             retireSlots = perfData.get('retSlots', 1)
