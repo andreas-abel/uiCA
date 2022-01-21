@@ -1485,7 +1485,10 @@ def getXedDisas(filename, rawFile, uArchConfig: MicroArchConfig, iacaMarkers):
 def getInstructions(disas: List[InstrDisas], uArchConfig: MicroArchConfig, archData, alignmentOffset, noMicroFusion=False, noMacroFusion=False):
    instructions: List[Instr] = []
    zmmRegistersInUse = any(('ZMM' in reg) for instrD in disas for reg in instrD.regOperands.values())
+   nextAddr = alignmentOffset
    for instrD in disas:
+      addr = nextAddr
+      nextAddr = nextAddr + (len(instrD.opcode) // 2)
       usedRegs = [getCanonicalReg(r) for _, r in instrD.regOperands.items() if r in GPRegs or 'MM' in r]
       sameReg = (len(usedRegs) > 1 and len(set(usedRegs)) == 1)
       usesIndexedAddr = any((getMemAddr(memOp).index is not None) for memOp in instrD.memOperands.values())
@@ -1688,7 +1691,8 @@ def getInstructions(disas: List[InstrDisas], uArchConfig: MicroArchConfig, archD
       # Macro-fusion
       if instructions:
          prevInstr = instructions[-1]
-         if instruction.instrStr in prevInstr.macroFusibleWith:
+         # Macrofusion does not happen when the jump is at the beginning of a 64 byte cache line
+         if instruction.instrStr in prevInstr.macroFusibleWith and (addr % 64) != 0:
             instruction.macroFusedWithPrevInstr = True
             prevInstr.macroFusedWithNextInstr = True
             instrPorts = list(instruction.portData.keys())[0]
@@ -1707,8 +1711,6 @@ def getInstructions(disas: List[InstrDisas], uArchConfig: MicroArchConfig, archD
 
       # JCC erratum
       if not uArchConfig.branchCanBeLastInstrInCachedBlock:
-         addr = alignmentOffset + sum((len(prevInstr.opcode) // 2) for prevInstr in instructions)
-         nextAddr = addr + (len(instruction.opcode) // 2)
          if instruction.isBranchInstr and (addr // 32) != (nextAddr // 32):
             instruction.cannotBeInDSBDueToJCCErratum = True
          if instruction.macroFusedWithPrevInstr:
