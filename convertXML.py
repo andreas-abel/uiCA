@@ -6,6 +6,7 @@ import xml.etree.ElementTree as ET
 from collections import defaultdict
 
 from disas import allXmlAttributes
+from microArchConfigs import MicroArchConfigs
 
 def main():
    parser = argparse.ArgumentParser(description='Convert XML file')
@@ -36,6 +37,8 @@ def main():
                writtenFlags.add(flag)
 
       for archNode in XMLInstr.iter('architecture'):
+         if archNode.attrib['name'] not in MicroArchConfigs:
+            continue
          measurementNode = archNode.find('./measurement')
          if measurementNode is not None:
             instrData = dict()
@@ -145,6 +148,15 @@ def main():
          f.write('instrData = ' + repr(instrDataForArch[arch]) + '\n')
          f.write('perfData = ' + repr(perfDataForArch[arch]) + '\n')
          f.write('attrData = ' + repr(attrDataForArch[arch]) + '\n')
+
+   allPorts = {}
+   ALUPorts = {}
+   for arch in instrDataForArch.keys():
+      allPorts[arch] = sorted({p for pd in perfDataForArch[arch] for pc in pd.get('ports', {}).keys() for p in pc})
+      ALUPorts[arch] = sorted(next(iter(perfDataForArch[arch][instrDataForArch[arch]['AND_GPRv_IMMb'][0]['perfData']]['ports'].keys())))
+   with open(os.path.join(path, 'uArchInfo.py'), 'w') as f:
+      f.write('allPorts = ' + repr(allPorts) + '\n')
+      f.write('ALUPorts = ' + repr(ALUPorts) + '\n')
 
 
 if __name__ == "__main__":

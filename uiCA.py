@@ -15,7 +15,7 @@ random.seed(0)
 from disas import *
 from x64_lib import *
 from microArchConfigs import MicroArchConfig, MicroArchConfigs
-
+from instrData.uArchInfo import allPorts, ALUPorts
 
 class UopProperties:
    def __init__(self, instr, possiblePorts, inputOperands, outputOperands, latencies, divCycles=0, isLoadUop=False, isStoreAddressUop=False, memAddr=None,
@@ -94,7 +94,7 @@ class StackSyncUop(Uop):
    def __init__(self, instrI, uArchConfig):
       inOp = RegOperand('RSP')
       outOp = RegOperand('RSP')
-      prop = UopProperties(instrI.instr, uArchConfig.stackSyncUopPorts, [inOp], [outOp], {outOp: 1}, isFirstUopOfInstr=True)
+      prop = UopProperties(instrI.instr, ALUPorts[uArchConfig.name], [inOp], [outOp], {outOp: 1}, isFirstUopOfInstr=True)
       Uop.__init__(self, prop, instrI)
 
 
@@ -985,14 +985,14 @@ class Scheduler:
    def __init__(self, uArchConfig: MicroArchConfig):
       self.uArchConfig = uArchConfig
       self.uops = set()
-      self.portUsage = {p:0  for p in self.uArchConfig.allPorts}
+      self.portUsage = {p:0  for p in allPorts[self.uArchConfig.name]}
       self.portUsageAtStartOfCycle = {}
       self.nextP23Port = '2'
       self.nextP49Port = '4'
       self.nextP78Port = '7'
       self.uopsDispatchedInPrevCycle = [] # the port usage counter is decreased one cycle after uops are dispatched
       self.divBusy = 0
-      self.readyQueue = {p:[] for p in self.uArchConfig.allPorts}
+      self.readyQueue = {p:[] for p in allPorts[self.uArchConfig.name]}
       self.readyDivUops = []
       self.uopsReadyInCycle = {}
       self.nonReadyUops = [] # uops not yet added to uopsReadyInCycle (in order)
@@ -1025,7 +1025,7 @@ class Scheduler:
       self.updateBlockedResources()
 
    def dispatchUops(self, clock):
-      applicablePorts = list(self.uArchConfig.allPorts)
+      applicablePorts = list(allPorts[self.uArchConfig.name])
 
       if ('4' in applicablePorts) and ('9' in applicablePorts) and self.readyQueue['4'] and self.readyQueue['9']:
          # two stores can be executed in the same cycle if they access the same cache line; see 'Paired Stores' in the optimization manual
@@ -1163,7 +1163,7 @@ class Scheduler:
                port = uop.prop.possiblePorts[0]
             elif self.uArchConfig.simplePortAssignment:
                port = random.choice(uop.prop.possiblePorts)
-            elif len(self.uArchConfig.allPorts) == 10:
+            elif len(allPorts[self.uArchConfig.name]) == 10:
                applicablePortUsages = [(p,u) for p, u in self.portUsageAtStartOfCycle.get(clock-1, self.portUsageAtStartOfCycle[clock]).items()
                                        if p in uop.prop.possiblePorts]
                sortedPortUsages = sorted(applicablePortUsages, key=lambda x: (x[1], -int(x[0])))
@@ -1189,7 +1189,7 @@ class Scheduler:
                   port = sortedPorts[1]
                else:
                   port = sortedPorts[nPC % len(sortedPorts)]
-            elif len(self.uArchConfig.allPorts) == 8:
+            elif len(allPorts[self.uArchConfig.name]) == 8:
                applicablePortUsages = [(p,u) for p, u in self.portUsageAtStartOfCycle[clock].items() if p in uop.prop.possiblePorts]
                minPort, minPortUsage = min(applicablePortUsages, key=lambda x: (x[1], -int(x[0]))) # port with minimum usage so far
 
@@ -1816,7 +1816,7 @@ TableLineData = NamedTuple('TableLineData', [('string', str), ('instr', Optional
 
 def getUopsTableColumns(tableLineData: List[TableLineData], uArchConfig: MicroArchConfig):
    columnKeys = ['MITE', 'MS', 'DSB', 'LSD', 'Issued', 'Exec.']
-   columnKeys.extend(('Port ' + p) for p in uArchConfig.allPorts)
+   columnKeys.extend(('Port ' + p) for p in allPorts[uArchConfig.name])
    if any(uop.prop.divCycles for tld in tableLineData for lamUop in tld.uopsForRnd[0] for uop in lamUop.getUnfusedUops()):
       columnKeys.append('Div')
    columnKeys.append('Notes')
@@ -1947,7 +1947,7 @@ def getBottlenecks(TP, perfEvents, instrInstances: List[InstrInstance], uArchCon
 
    # Dependencies
    portsUsedInCycle = {}
-   delayedUopsWithInpDepForPort = {p: [] for p in uArchConfig.allPorts}
+   delayedUopsWithInpDepForPort = {p: [] for p in allPorts[uArchConfig.name]}
    for uop in allUnfusedUops:
       if uop.dispatched:
          portsUsedInCycle.setdefault(uop.dispatched, set()).add(uop.actualPort)
@@ -1956,7 +1956,7 @@ def getBottlenecks(TP, perfEvents, instrInstances: List[InstrInstance], uArchCon
    if portsUsedInCycle:
       depBottlenecks = 0
       for cycle in range(min(portsUsedInCycle.keys()), max(portsUsedInCycle.keys())):
-         for port in uArchConfig.allPorts:
+         for port in allPorts[uArchConfig.name]:
             if port in portsUsedInCycle.get(cycle, set()):
                continue
             for uop in delayedUopsWithInpDepForPort[port]:
@@ -2136,7 +2136,7 @@ def generateHTMLGraph(filename, instructions, instrInstances: List[InstrInstance
                cycle = getattr(uop, evtAttrName)
                addEvent(evtName, cycle)
 
-   for port in uArchConfig.allPorts:
+   for port in allPorts[uArchConfig.name]:
       eventsDict['&mu;ops port ' + port] = [0 for _ in range(0,maxCycle+1)]
    for instrI in instrInstances:
       for lamUop in instrI.uops:
@@ -2171,7 +2171,7 @@ def generateJSONOutput(filename, instructions: List[Instr], frontEnd: FrontEnd, 
       'issueWidth': uArchConfig.issueWidth,
       'RBWidth': uArchConfig.RBWidth,
       'RSWidth': uArchConfig.RSWidth,
-      'allPorts': uArchConfig.allPorts,
+      'allPorts': allPorts[uArchConfig.name],
       'nDecoders': uArchConfig.nDecoders,
       'DSBBlockSize': uArchConfig.DSBBlockSize,
       'LSD': (frontEnd.uopSource == 'LSD'),

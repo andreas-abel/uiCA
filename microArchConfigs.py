@@ -2,12 +2,12 @@ import copy
 from typing import Dict
 
 class MicroArchConfig:
-   def __init__(self, name, XEDName, IQWidth, DSBWidth, IDQWidth, issueWidth, RBWidth, RSWidth, retireWidth, allPorts, pop5CRequiresComplexDecoder,
-                macroFusibleInstrCanBeDecodedAsLastInstr, branchCanBeLastInstrInCachedBlock, stackSyncUopPorts, both32ByteBlocksMustBeCacheable=False,
-                nDecoders=4, preDecodeWidth=5, predecodeDecodeDelay=3, issueDispatchDelay=5, DSB_MS_Stall=4, pop5CEndsDecodeGroup=True,
-                high8RenamedSeparately=True, movzxHigh8AliasCanBeEliminated=True, moveEliminationPipelineLength=2, moveEliminationGPRSlots=4,
-                moveEliminationSIMDSlots=4, moveEliminationGPRAllAliasesMustBeOverwritten=True, LSDEnabled=True, LSDUnrolling={}, fastPointerChasing=True,
-                DSBBlockSize=32, simplePortAssignment=False):
+   def __init__(self, name, XEDName, IQWidth, DSBWidth, IDQWidth, issueWidth, RBWidth, RSWidth, retireWidth, pop5CRequiresComplexDecoder,
+                macroFusibleInstrCanBeDecodedAsLastInstr, branchCanBeLastInstrInCachedBlock, both32ByteBlocksMustBeCacheable=False, nDecoders=4,
+                preDecodeWidth=5, predecodeDecodeDelay=3, issueDispatchDelay=5, DSB_MS_Stall=4, pop5CEndsDecodeGroup=True, high8RenamedSeparately=True,
+                movzxHigh8AliasCanBeEliminated=True, moveEliminationPipelineLength=2, moveEliminationGPRSlots=4, moveEliminationSIMDSlots=4,
+                moveEliminationGPRAllAliasesMustBeOverwritten=True, LSDEnabled=True, LSDUnrolling={}, fastPointerChasing=True, DSBBlockSize=32,
+                simplePortAssignment=False):
       self.name = name
       self.XEDName = XEDName # see obj/wkit/bin/xed -chip-check-list
       self.IQWidth = IQWidth # width of the instruction queue
@@ -17,11 +17,9 @@ class MicroArchConfig:
       self.RBWidth = RBWidth # width of the reorder buffer
       self.RSWidth = RSWidth # width of the reservation station
       self.retireWidth = retireWidth # number of uops that can be retired per cycle
-      self.allPorts = allPorts # list of ports
       self.pop5CRequiresComplexDecoder = pop5CRequiresComplexDecoder # pop rsp and pop r12 require the complex decoder
       self.macroFusibleInstrCanBeDecodedAsLastInstr = macroFusibleInstrCanBeDecodedAsLastInstr # if True, a macro-fusible instr. can be decoded on the last decoder or when the instruction queue is empty
       self.branchCanBeLastInstrInCachedBlock = branchCanBeLastInstrInCachedBlock # probably because of JCC Erratum https://www.intel.com/content/dam/support/us/en/documents/processors/mitigations-jump-conditional-code-erratum.pdf
-      self.stackSyncUopPorts = stackSyncUopPorts # ports that stack pointer synchronization uops can use
       self.both32ByteBlocksMustBeCacheable = both32ByteBlocksMustBeCacheable # a 32 byte block can only be in the DSB if the other 32 byte block in the same 64 byte block is also cacheable
       self.nDecoders = nDecoders # number of decoders
       self.preDecodeWidth = preDecodeWidth # number of instructions that can be predecoded per cycle
@@ -54,12 +52,10 @@ MicroArchConfigs['SKL'] = MicroArchConfig( # https://en.wikichip.org/wiki/intel/
    RBWidth = 224,
    RSWidth = 97,
    retireWidth = 4,
-   allPorts = [str(i) for i in range(0,8)],
    pop5CRequiresComplexDecoder = True,
    pop5CEndsDecodeGroup = False,
    macroFusibleInstrCanBeDecodedAsLastInstr = True,
    branchCanBeLastInstrInCachedBlock = False,
-   stackSyncUopPorts = ['0','1','5','6'],
    both32ByteBlocksMustBeCacheable = True,
    movzxHigh8AliasCanBeEliminated = False,
    moveEliminationPipelineLength = 2,
@@ -94,12 +90,10 @@ MicroArchConfigs['HSW'] = MicroArchConfig( # https://en.wikichip.org/wiki/intel/
    RBWidth = 192,
    RSWidth = 60,
    retireWidth = 4,
-   allPorts = [str(i) for i in range(0,8)],
    pop5CRequiresComplexDecoder = True,
    pop5CEndsDecodeGroup = True,
    macroFusibleInstrCanBeDecodedAsLastInstr = False,
    branchCanBeLastInstrInCachedBlock = True,
-   stackSyncUopPorts = ['0','1','5','6'],
    both32ByteBlocksMustBeCacheable = False,
    movzxHigh8AliasCanBeEliminated = False,
    moveEliminationPipelineLength = 2,
@@ -122,12 +116,10 @@ MicroArchConfigs['IVB'] = MicroArchConfig( # https://en.wikichip.org/wiki/intel/
    RBWidth = 168,
    RSWidth = 54,
    retireWidth = 4,
-   allPorts = [str(i) for i in range(0,6)],
    pop5CRequiresComplexDecoder = True,
    pop5CEndsDecodeGroup = True,
    macroFusibleInstrCanBeDecodedAsLastInstr = False,
    branchCanBeLastInstrInCachedBlock = True,
-   stackSyncUopPorts = ['0','1','5'],
    both32ByteBlocksMustBeCacheable = False,
    moveEliminationPipelineLength = 3,
    moveEliminationGPRAllAliasesMustBeOverwritten = False,
@@ -149,12 +141,10 @@ MicroArchConfigs['ICL'] = MicroArchConfig( # https://en.wikichip.org/wiki/intel/
    RBWidth = 352,
    RSWidth = 160,
    retireWidth = 8,
-   allPorts = [str(i) for i in range(0,10)],
    pop5CRequiresComplexDecoder = True,
    pop5CEndsDecodeGroup = False,
    macroFusibleInstrCanBeDecodedAsLastInstr = True,
    branchCanBeLastInstrInCachedBlock = True,
-   stackSyncUopPorts = ['0','1','5','6'],
    LSDEnabled = True,
    DSB_MS_Stall = 2,
    fastPointerChasing = False,
