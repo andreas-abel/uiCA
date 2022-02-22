@@ -4,3 +4,4 @@
 [submodule "mbuild"]
 	path = mbuild
 	url = https://github.com/intelxed/mbuild.git
+	branch = main

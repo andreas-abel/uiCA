@@ -1,9 +1,8 @@
 @echo off
 git submodule update --init || exit /b
 cd XED-to-XML
-py mfile.py examples || exit /b
-copy /y obj\wkit\bin\xed.exe ..
-copy /y disas.py ..
+py mfile.py --opt=2 --no-encoder pymodule || exit /b
+copy /y xed.* ..
 cd ..
 
 git submodule deinit -f --all

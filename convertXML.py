@@ -5,8 +5,9 @@ import os
 import xml.etree.ElementTree as ET
 from collections import defaultdict
 
-from disas import allXmlAttributes
 from microArchConfigs import MicroArchConfigs
+
+allXmlAttributes = ['agen', 'bcast', 'eosz', 'high8', 'immzero', 'mask', 'rep', 'rm', 'sae', 'zeroing']
 
 def main():
    parser = argparse.ArgumentParser(description='Convert XML file')
@@ -22,7 +23,7 @@ def main():
    for XMLInstr in root.iter('instruction'):
       iform = XMLInstr.attrib['iform']
       instrString = XMLInstr.attrib['string']
-      attr = {a.upper(): XMLInstr.attrib[a] for a in allXmlAttributes if a in XMLInstr.attrib}
+      attr = {a: XMLInstr.attrib[a] for a in allXmlAttributes if a in XMLInstr.attrib}
       opIdxToName = {o.attrib['idx']:o.attrib['name'] for o in XMLInstr.iter('operand') if 'name' in o.attrib}
 
       flagNode = XMLInstr.find('./operand[@type="flags"]')

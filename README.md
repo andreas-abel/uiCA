@@ -6,7 +6,7 @@ In addition to that, it also provides insights into how the code is executed.
 uiCA is based on data from [uops.info](https://www.uops.info), combined with a detailed pipeline model.
 Like related tools, it assumes that all memory accesses result in cache hits.
 
-Details on uiCA's pipeline model, as well as a comparison with similar tools, can be found in our paper [Accurate Throughput Prediction of Basic Blocks on Recent Intel Microarchitectures](https://arxiv.org/pdf/2107.14210.pdf).
+Details on uiCA's pipeline model, as well as a comparison with similar tools, can be found in our paper [A Parametric Microarchitecture Model for Accurate Basic Block Throughput Prediction on Recent Intel CPUs](https://arxiv.org/pdf/2107.14210.pdf).
 
 ## Web Interface
 

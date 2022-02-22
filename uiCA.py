@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 
+import argparse
 import importlib
 import os
 import re
@@ -12,7 +13,7 @@ from typing import List, Set, Dict, NamedTuple, Optional
 import random
 random.seed(0)
 
-from disas import *
+import xed
 from x64_lib import *
 from microArchConfigs import MicroArchConfig, MicroArchConfigs
 from instrData.uArchInfo import allPorts, ALUPorts
@@ -419,7 +420,7 @@ class Renamer:
    def getStoreBufferKey(self, memAddr):
       if memAddr is None:
          return None
-      return (self.getAbstractValueForReg(memAddr.base), self.getAbstractValueForReg(memAddr.index), memAddr.scale, memAddr.displacement)
+      return (self.getAbstractValueForReg(memAddr.get('base')), self.getAbstractValueForReg(memAddr.get('index')), memAddr.get('scale'), memAddr.get('disp'))
 
    def generateFreshAbstractValue(self):
       return AbstractValue(next(self.abstractValueBaseGenerator), 0)
@@ -1299,9 +1300,9 @@ def adjustLatenciesAndAddMergeUops(instructions, uArchConfig: MicroArchConfig):
       for uop in instr.UopPropertiesList:
          if uArchConfig.fastPointerChasing and (uop.isLoadUop or uop.isStoreAddressUop):
             memAddr = uop.memAddr
-            if (memAddr is not None) and (memAddr.base is not None) and (0 <= memAddr.displacement < 2048):
-               canonicalBaseReg = getCanonicalReg(memAddr.base)
-               canonicalIndexReg = getCanonicalReg(memAddr.index) if memAddr.index else None
+            if (memAddr is not None) and (memAddr.get('base') is not None) and (0 <= memAddr['disp'] < 2048):
+               canonicalBaseReg = getCanonicalReg(memAddr['base'])
+               canonicalIndexReg = getCanonicalReg(memAddr['index']) if ('index' in memAddr) else None
                if ((canonicalBaseReg in prevWriteToReg) and (prevWriteToReg[canonicalBaseReg].instrStr in ['MOV (R64, M64)', 'MOV (RAX, M64)',
                                                                                                           'MOV (R32, M32)', 'MOV (EAX, M32)',
                                                                                                           'MOVSXD (R64, M32)', 'POP (R64)'])
@@ -1471,48 +1472,35 @@ def computeUopProperties(instructions):
       instr.UopPropertiesList[-1].isLastUopOfInstr = True
 
 
-def getXedDisas(filename, rawFile, uArchConfig: MicroArchConfig, iacaMarkers):
-   xedBinary = os.path.join(os.path.dirname(os.path.realpath(__file__)), 'xed')
-   output = subprocess.check_output([xedBinary, '-64', '-v', '4', '-isa-set', '-chip-check', uArchConfig.XEDName,
-                                     ('-ir' if rawFile else '-i'), filename], stderr=subprocess.DEVNULL).decode()
-   if 'ERROR: GENERAL_ERROR Could not decode at offset:' in output:
-      print('\n'.join(l for l in output.splitlines() if 'ERROR: GENERAL_ERROR Could not decode at offset:' in l))
-      exit(1)
-
-   return parseXedOutput(output, iacaMarkers)
-
-
-def getInstructions(disas: List[InstrDisas], uArchConfig: MicroArchConfig, archData, alignmentOffset, noMicroFusion=False, noMacroFusion=False):
+def getInstructions(disas, uArchConfig: MicroArchConfig, archData, alignmentOffset, noMicroFusion=False, noMacroFusion=False):
    instructions: List[Instr] = []
-   zmmRegistersInUse = any(('ZMM' in reg) for instrD in disas for reg in instrD.regOperands.values())
+   zmmRegistersInUse = any(('ZMM' in reg) for instrD in disas for reg in instrD['regOperands'].values())
    nextAddr = alignmentOffset
    for instrD in disas:
       addr = nextAddr
-      nextAddr = nextAddr + (len(instrD.opcode) // 2)
-      usedRegs = [getCanonicalReg(r) for _, r in instrD.regOperands.items() if r in GPRegs or 'MM' in r]
+      nextAddr = nextAddr + (len(instrD['opcode']) // 2)
+      usedRegs = [getCanonicalReg(r) for _, r in instrD['regOperands'].items() if r in GPRegs or 'MM' in r]
       sameReg = (len(usedRegs) > 1 and len(set(usedRegs)) == 1)
-      usesIndexedAddr = any((getMemAddr(memOp).index is not None) for memOp in instrD.memOperands.values())
-      posNominalOpcode = int(instrD.attributes.get('POS_NOMINAL_OPCODE', 0))
-      immediateWidth = int(instrD.attributes.get('IMM_WIDTH', 0))
-      lcpStall = ('PREFIX66' in instrD.attributes) and (immediateWidth == 16)
-      immediate = int(instrD.attributes['IMM0'], 16) if ('IMM0' in instrD.attributes) else None
-      if (immediate is not None) and ((immediate & (1 << (immediateWidth - 1))) != 0):
-         immediate = immediate - (1 << immediateWidth)
+      usesIndexedAddr = any((memOp.get('index') is not None) for memOp in instrD['memOperands'].values())
+      posNominalOpcode = instrD['pos_nominal_opcode']
+      immediateWidth = instrD.get('IMM_WIDTH', 0)
+      lcpStall = int(instrD['prefix66']) and (immediateWidth == 16)
+      immediate = instrD['IMM0'] if ('IMM0' in instrD) else None
       implicitRSPChange = 0
-      if any(('STACKPOP' in r) for r in instrD.regOperands.values()):
-         implicitRSPChange = pow(2, int(instrD.attributes.get('EOSZ', 1)))
-      if any(('STACKPUSH' in r) for r in instrD.regOperands.values()):
-         implicitRSPChange = -pow(2, int(instrD.attributes.get('EOSZ', 1)))
-      isBranchInstr = any(True for n, r in instrD.regOperands.items() if ('IP' in r) and ('W' in instrD.rw[n]))
-      isSerializingInstr = (instrD.iform in ['LFENCE', 'CPUID', 'IRET', 'IRETD', 'RSM', 'INVD', 'INVEPT_GPR64_MEMdq', 'INVLPG_MEMb', 'INVVPID_GPR64_MEMdq',
+      if any(('STACKPOP' in r) for r in instrD['regOperands'].values()):
+         implicitRSPChange = pow(2, int(instrD['eosz']))
+      if any(('STACKPUSH' in r) for r in instrD['regOperands'].values()):
+         implicitRSPChange = -pow(2, int(instrD['eosz']))
+      isBranchInstr = any(True for n, r in instrD['regOperands'].items() if ('IP' in r) and ('W' in instrD['rw'][n]))
+      isSerializingInstr = (instrD['iform'] in ['LFENCE', 'CPUID', 'IRET', 'IRETD', 'RSM', 'INVD', 'INVEPT_GPR64_MEMdq', 'INVLPG_MEMb', 'INVVPID_GPR64_MEMdq',
                                              'LGDT_MEMs64', 'LIDT_MEMs64', 'LLDT_MEMw', 'LLDT_GPR16', 'LTR_MEMw', 'LTR_GPR16', 'MOV_CR_CR_GPR64',
                                              'MOV_DR_DR_GPR64', 'WBINVD', 'WRMSR'])
-      isLoadSerializing = (instrD.iform in ['MFENCE', 'LFENCE'])
-      isStoreSerializing = (instrD.iform in ['MFENCE', 'SFENCE'])
+      isLoadSerializing = (instrD['iform'] in ['MFENCE', 'LFENCE'])
+      isStoreSerializing = (instrD['iform'] in ['MFENCE', 'SFENCE'])
 
       instruction = None
-      for instrData in archData.instrData.get(instrD.iform, []):
-         if matchAttributes(instrD.attributes, archData.attrData[instrData['attr']]):
+      for instrData in archData.instrData.get(instrD['iform'], []):
+         if xed.matchXMLAttributes(instrD, archData.attrData[instrData['attr']]):
             perfData = archData.perfData[instrData['perfData']]
             uops = perfData.get('uops', 0)
             retireSlots = perfData.get('retSlots', 1)
@@ -1547,18 +1535,18 @@ def getInstructions(disas: List[InstrDisas], uArchConfig: MicroArchConfig, archD
                nAvailableSimpleDecoders = perfData.get('sDec_I', nAvailableSimpleDecoders)
                TP = perfData.get('TP_I', TP)
 
-            instrInputRegOperands = [(n,r) for n, r in instrD.regOperands.items() if (not 'IP' in r)
+            instrInputRegOperands = [(n,r) for n, r in instrD['regOperands'].items() if (not 'IP' in r)
                                         and (not 'STACK' in r)
                                         and (not 'RFLAGS' in r)
-                                        and ((r != 'K0') or ('{k0}' in instrD.asm)) # otherwise, K0 indicates unmasked operations
-                                        and (('R' in instrD.rw[n]) or any(n==k[0] for k in latData.keys()))]
-            instrInputMemOperands = [(n,m) for n, m in instrD.memOperands.items() if ('R' in instrD.rw[n]) or ('CW' in instrD.rw[n])]
+                                        and ((r != 'K0') or ('{k0}' in instrD['asm'])) # otherwise, K0 indicates unmasked operations
+                                        and (('R' in instrD['rw'][n]) or any(n==k[0] for k in latData.keys()))]
+            instrInputMemOperands = [(n,m) for n, m in instrD['memOperands'].items() if ('R' in instrD['rw'][n]) or ('CW' in instrD['rw'][n])]
 
-            instrOutputRegOperands = [(n, r) for n, r in instrD.regOperands.items() if (not 'IP' in r) and (not 'STACK' in r) and (not 'RFLAGS' in r)
-                                                                                          and ('W' in instrD.rw[n])]
-            instrOutputMemOperands = [(n, m) for n, m in instrD.memOperands.items() if 'W' in instrD.rw[n]]
+            instrOutputRegOperands = [(n, r) for n, r in instrD['regOperands'].items() if (not 'IP' in r) and (not 'STACK' in r) and (not 'RFLAGS' in r)
+                                                                                          and ('W' in instrD['rw'][n])]
+            instrOutputMemOperands = [(n, m) for n, m in instrD['memOperands'].items() if 'W' in instrD['rw'][n]]
 
-            instrFlagOperands = [n for n, r in instrD.regOperands.items() if r == 'RFLAGS']
+            instrFlagOperands = [n for n, r in instrD['regOperands'].items() if r == 'RFLAGS']
             instrFlagOperand = instrFlagOperands[0] if instrFlagOperands else None
 
             movzxSpecialCase = ((not uArchConfig.movzxHigh8AliasCanBeEliminated) and (instrData['string'] in ['MOVZX (R64, R8l)', 'MOVZX (R32, R8l)'])
@@ -1595,7 +1583,7 @@ def getInstructions(disas: List[InstrDisas], uArchConfig: MicroArchConfig, archD
                if outputFlagOperands:
                   outputOperandsDict[instrFlagOperand] = outputFlagOperands
             for n, m in instrOutputMemOperands:
-               memOp = MemOperand(getMemAddr(m))
+               memOp = MemOperand(m)
                outputMemOperands.append(memOp)
                outputOperandsDict[n] = [memOp]
 
@@ -1623,7 +1611,7 @@ def getInstructions(disas: List[InstrDisas], uArchConfig: MicroArchConfig, archD
                         latencies[(flagOp, outOp)] = latData.get((instrFlagOperand, outN), 1)
 
             for inpN, inpM in instrInputMemOperands:
-               memOp = MemOperand(getMemAddr(inpM))
+               memOp = MemOperand(inpM)
                if 'AGEN' in inpN:
                   agenOperands.append(memOp)
                else:
@@ -1632,10 +1620,9 @@ def getInstructions(disas: List[InstrDisas], uArchConfig: MicroArchConfig, archD
                      for outOp in outOps:
                         latencies[(memOp, outOp)] = latData.get((inpN, outN, 'mem'), 1)
 
-            allMemOperands = set(instrInputMemOperands + instrOutputMemOperands)
+            allMemOperands = instrD['memOperands'].items()
             for inpN, inpM in allMemOperands:
-               memAddr = getMemAddr(inpM)
-               for reg, addrType in [(memAddr.base, 'addr'), (memAddr.index, 'addrI')]:
+               for reg, addrType in [(inpM.get('base'), 'addr'), (inpM.get('index'), 'addrI')]:
                   if (reg is None) or ('IP' in reg): continue
                   regOp = RegOperand(reg)
                   if (reg == 'RSP') and implicitRSPChange and (len(allMemOperands) == 1 or inpN == 'MEM1'):
@@ -1651,12 +1638,12 @@ def getInstructions(disas: List[InstrDisas], uArchConfig: MicroArchConfig, archD
             if (not complexDecoder) and (uopsMS or (uopsMITE + uopsMS > 1)):
                complexDecoder = True
 
-            if instrData['string'] in ['POP (R16)', 'POP (R64)'] and instrD.opcode.endswith('5C'):
+            if instrData['string'] in ['POP (R16)', 'POP (R64)'] and instrD['opcode'].endswith('5C'):
                complexDecoder |= uArchConfig.pop5CRequiresComplexDecoder
                if uArchConfig.pop5CEndsDecodeGroup:
                   nAvailableSimpleDecoders = 0
 
-            if zmmRegistersInUse and any(('MM' in reg) for reg in instrD.regOperands.values()):
+            if zmmRegistersInUse and any(('MM' in reg) for reg in instrD['regOperands'].values()):
                # if an instruction uses zmm registers, port 1 is not available for other vector instructions
                for p, u in list(portData.items()):
                   if ('1' in p) and (p != '1'):
@@ -1678,15 +1665,15 @@ def getInstructions(disas: List[InstrDisas], uArchConfig: MicroArchConfig, archD
             if noMacroFusion:
                macroFusibleWith = set()
 
-            instruction = Instr(instrD.asm, instrD.opcode, posNominalOpcode, instrData['string'], portData, uops, retireSlots, uopsMITE, uopsMS, divCycles,
-                                inputRegOperands, inputFlagOperands, inputMemOperands, outputRegOperands, outputFlagOperands, outputMemOperands,
+            instruction = Instr(instrD['asm'], instrD['opcode'], posNominalOpcode, instrData['string'], portData, uops, retireSlots, uopsMITE, uopsMS,
+                                divCycles, inputRegOperands, inputFlagOperands, inputMemOperands, outputRegOperands, outputFlagOperands, outputMemOperands,
                                 memAddrOperands, agenOperands, latencies, TP, immediate, lcpStall, implicitRSPChange, mayBeEliminated, complexDecoder,
                                 nAvailableSimpleDecoders, hasLockPrefix, isBranchInstr, isSerializingInstr, isLoadSerializing, isStoreSerializing,
                                 macroFusibleWith)
             break
 
       if instruction is None:
-         instruction = UnknownInstr(instrD.asm, instrD.opcode, posNominalOpcode)
+         instruction = UnknownInstr(instrD['asm'], instrD['opcode'], posNominalOpcode)
 
       # Macro-fusion
       if instructions:
@@ -2269,7 +2256,7 @@ def getURL(instrStr):
 
 
 # Returns the throughput
-def runSimulation(disas: List[InstrDisas], uArchConfig: MicroArchConfig, alignmentOffset, initPolicy, noMicroFusion, noMacroFusion, simpleFrontEnd,
+def runSimulation(disas, uArchConfig: MicroArchConfig, alignmentOffset, initPolicy, noMicroFusion, noMacroFusion, simpleFrontEnd,
                   printDetails=False, traceFile=None, graphFile=None, jsonFile=None):
    instructions = getInstructions(disas, uArchConfig, importlib.import_module('instrData.'+uArchConfig.name), alignmentOffset, noMicroFusion, noMacroFusion)
    if not instructions:
@@ -2400,7 +2387,7 @@ def main():
       if args.TPonly or args.trace or args.graph or args.json or (args.alignmentOffset == 'all'):
          print('Unsupported parameter combination')
          exit(1)
-      disasList = [getXedDisas(args.filename, args.raw, MicroArchConfigs[uArch], args.iacaMarkers) for uArch in allMicroArchs]
+      disasList = [xed.disasFile(args.filename, chip=MicroArchConfigs[uArch].XEDName, raw=args.raw, useIACAMarkers=args.iacaMarkers) for uArch in allMicroArchs]
       uArchConfigsList = [MicroArchConfigs[uArch] for uArch in allMicroArchs]
       with futures.ProcessPoolExecutor() as executor:
          TPList = list(executor.map(runSimulation, disasList, uArchConfigsList, repeat(int(args.alignmentOffset)), repeat(args.initPolicy),
@@ -2418,7 +2405,7 @@ def main():
       exit(0)
 
    uArchConfig = MicroArchConfigs[args.arch]
-   disas = getXedDisas(args.filename, args.raw, uArchConfig, args.iacaMarkers)
+   disas = xed.disasFile(args.filename, chip=uArchConfig.XEDName, raw=args.raw, useIACAMarkers=args.iacaMarkers)
    if args.alignmentOffset == 'all':
       if args.TPonly or args.trace or args.graph or args.json:
          print('Unsupported parameter combination')

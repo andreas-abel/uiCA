@@ -168,6 +168,9 @@ MicroArchConfigs['RKL'].moveEliminationGPRSlots = 'unlimited'
 MicroArchConfigs['CLX_SimplePorts'] = copy.deepcopy(MicroArchConfigs['CLX'])
 MicroArchConfigs['CLX_SimplePorts'].simplePortAssignment = True
 
+MicroArchConfigs['CLX_noLSD'] = copy.deepcopy(MicroArchConfigs['CLX'])
+MicroArchConfigs['CLX_noLSD'].LSDEnabled = False
+
 MicroArchConfigs['CLX_noLSDUnrolling'] = copy.deepcopy(MicroArchConfigs['CLX'])
 MicroArchConfigs['CLX_noLSDUnrolling'].LSDUnrolling = {}
 
