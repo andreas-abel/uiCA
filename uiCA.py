@@ -148,7 +148,7 @@ class Instr:
        return "Instr: " + str(self.__dict__)
 
    def canBeUsedByLSD(self):
-      return not (self.uopsMS or self.implicitRSPChange or any((op.reg in High8Regs) for op in self.inputRegOperands+self.outputRegOperands))
+      return not (self.uopsMS or self.implicitRSPChange or any((op.reg in High8Regs) for op in self.outputRegOperands))
 
 
 class UnknownInstr(Instr):
