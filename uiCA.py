@@ -630,7 +630,7 @@ class FrontEnd:
 
    def getDSBBlocks(self, cacheBlock):
       # see https://www.agner.org/optimize/microarchitecture.pdf, Section 9.3
-      posInCurBlock = 6
+      remainingEntriesInCurBlock = 0
       DSBBlocks = []
       for instrI in cacheBlock:
          instr = instrI.instr
@@ -645,28 +645,29 @@ class FrontEnd:
             elif (not (-2**15 <= instr.immediate < 2**15) and len(instr.memAddrOperands) > 0):
                requiresExtraEntry = True
 
-         if instr.uopsMS or (posInCurBlock + nRequiredEntries + int(requiresExtraEntry) > 6):
-            curBlock = deque([None] * 6)
-            posInCurBlock = 0
+         if instr.uopsMS or (nRequiredEntries + int(requiresExtraEntry) > remainingEntriesInCurBlock):
+            curBlock = deque()
+            remainingEntriesInCurBlock = 6
             DSBBlocks.append(curBlock)
 
          if instr.uopsMITE:
             for i, lamUop in enumerate(instrI.uops[:instr.uopsMITE]):
                if i == instr.uopsMITE - 1:
-                  curBlock[posInCurBlock] = DSBEntry(instrI, lamUop, instrI.uops[instr.uopsMITE:], requiresExtraEntry)
+                  curBlock.append(DSBEntry(len(curBlock), instrI, lamUop, instrI.uops[instr.uopsMITE:], requiresExtraEntry))
                else:
-                  curBlock[posInCurBlock] = DSBEntry(instrI, lamUop, [], False)
-               posInCurBlock += 1
+                  curBlock.append(DSBEntry(len(curBlock), instrI, lamUop, [], False))
+               remainingEntriesInCurBlock -= 1
          elif instr.uopsMS:
-            curBlock[posInCurBlock] = DSBEntry(instrI, None, list(instrI.uops), False)
+            curBlock.append(DSBEntry(len(curBlock), instrI, None, list(instrI.uops), False))
          else:
-            curBlock[posInCurBlock] = DSBEntry(instrI, None, [], False)
-            posInCurBlock += 1
+            curBlock.append(DSBEntry(len(curBlock), instrI, None, [], False))
+            remainingEntriesInCurBlock -= 1
 
          if requiresExtraEntry:
-            posInCurBlock += 1
+            remainingEntriesInCurBlock -= 1
          if instr.uopsMS:
-            posInCurBlock = 6
+            remainingEntriesInCurBlock = 0
+
       return DSBBlocks
 
 
@@ -732,30 +733,26 @@ class FrontEnd:
          uop.instrI.stackSyncUops.append(lamUop)
 
 
-DSBEntry = namedtuple('DSBEntry', ['instrI', 'uop', 'MSUops', 'requiresExtraEntry'])
+DSBEntry = namedtuple('DSBEntry', ['slot', 'instrI', 'uop', 'MSUops', 'requiresExtraEntry'])
 
 class DSB:
    def __init__(self, MS, uArchConfig: MicroArchConfig):
       self.MS = MS
       self.DSBBlockQueue = deque()
       self.uArchConfig = uArchConfig
+      self.delayInPrevCycle = False
 
    def cycle(self):
-      DSBBlock = self.DSBBlockQueue[0]
-      while (DSBBlock[0] is None):
-         DSBBlock.popleft()
-         if not DSBBlock:
-            self.DSBBlockQueue.popleft()
-            if self.DSBBlockQueue:
-               DSBBlock = self.DSBBlockQueue[0]
-            else:
-               return []
-
       retList = []
+      DSBBlock = self.DSBBlockQueue[0]
+      newDSBBlockStarted = (DSBBlock[0].slot == 0)
       secondDSBBlockLoaded = False
-      for _ in range(0, self.uArchConfig.DSBWidth):
+      remainingSlots = self.uArchConfig.DSBWidth
+      delayInPrevCycle = self.delayInPrevCycle
+      self.delayInPrevCycle = False
+      while remainingSlots > 0:
          if not DSBBlock:
-            if (not secondDSBBlockLoaded) and self.DSBBlockQueue:
+            if (not secondDSBBlockLoaded) and self.DSBBlockQueue and (not self.DSBBlockQueue[0][-1].MSUops):
                secondDSBBlockLoaded = True
                DSBBlock = self.DSBBlockQueue[0]
                prevInstrI = retList[-1][0]
@@ -768,36 +765,43 @@ class DSB:
 
          entry = DSBBlock[0]
 
-         if (entry is not None) and entry.requiresExtraEntry and (len(retList) == self.uArchConfig.DSBWidth - 1):
+         if entry.requiresExtraEntry and (remainingSlots < 2):
             return retList
-
-         DSBBlock.popleft()
-
-         if (entry is not None) and all((e is None) for e in DSBBlock):
-            if (len(self.DSBBlockQueue) > 1) and ((self.uArchConfig.DSBBlockSize == 64)
-                  or (self.DSBBlockQueue[1][0].instrI.address//32 != entry.instrI.address//32)):
-               if entry.instrI.instr.isBranchInstr or entry.instrI.instr.macroFusedWithNextInstr:
-                  if (len(DSBBlock) == 5):
-                     DSBBlock = deque([None])
-                  elif (len(DSBBlock) == 4):
-                     DSBBlock.clear()
-               else:
-                  DSBBlock.clear()
-
-         if not DSBBlock:
-            self.DSBBlockQueue.popleft()
-
-         if entry is None:
-            continue
 
          if entry.uop:
             retList.append((entry.instrI, entry.uop))
             entry.uop.uopSource = 'DSB'
+            if entry.requiresExtraEntry:
+               remainingSlots = 0
+               self.delayInPrevCycle = True
+            else:
+               remainingSlots -= 1
          if entry.MSUops:
             self.MS.addUops(entry.MSUops, 'DSB')
-            return retList
-         if entry.requiresExtraEntry:
-            return retList
+            remainingSlots = 0
+
+         DSBBlock.popleft()
+         if not DSBBlock:
+            self.DSBBlockQueue.popleft()
+            if remainingSlots and self.DSBBlockQueue and (self.uArchConfig.DSBWidth == 6):
+               nextInstrAddr = self.DSBBlockQueue[0][0].instrI.address
+               nextInstrInSameMemoryBlock = (nextInstrAddr//self.uArchConfig.DSBBlockSize == entry.instrI.address//self.uArchConfig.DSBBlockSize)
+               isBranchInstr = (entry.instrI.instr.isBranchInstr or entry.instrI.instr.macroFusedWithNextInstr)
+               if (self.uArchConfig.DSBBlockSize == 32) and nextInstrInSameMemoryBlock and isBranchInstr and (not delayInPrevCycle):
+                  remainingSlots = 0
+               elif not nextInstrInSameMemoryBlock:
+                  if newDSBBlockStarted:
+                     if len(retList) in [1, 2]:
+                        remainingSlots = 4
+                     elif len(retList) in [3, 4]:
+                        remainingSlots = 2
+                     elif len(retList) == 5:
+                        remainingSlots = 1
+                  elif isBranchInstr:
+                     if (len(retList) == 1) or ((len(retList) == 2) and (entry.slot >= 4)):
+                        remainingSlots = 4
+                     else:
+                        remainingSlots = min(remainingSlots, 2)
 
       return retList
 
