@@ -494,9 +494,10 @@ class FrontEnd:
          cacheBlocksForFirstRound = next(self.cacheBlocksForNextRoundGenerator)
 
          if self.uArchConfig.DSBBlockSize == 32:
-            allBlocksCanBeCached = all(self.canBeCached(block) for cb in cacheBlocksForFirstRound for block in split64ByteBlockTo32ByteBlocks(cb) if block)
+            allBlocksCanBeCached = all(canBeInDSB(block, uArchConfig.DSBBlockSize) for cb in cacheBlocksForFirstRound
+                                       for block in split64ByteBlockTo32ByteBlocks(cb) if block)
          else:
-            allBlocksCanBeCached = all(self.canBeCached(block) for block in cacheBlocksForFirstRound)
+            allBlocksCanBeCached = all(canBeInDSB(block, uArchConfig.DSBBlockSize) for block in cacheBlocksForFirstRound)
 
          allInstrsCanBeUsedByLSD = all(instrI.instr.canBeUsedByLSD() for cb in cacheBlocksForFirstRound for instrI in cb)
          nUops = sum(len(instrI.uops) for cb in cacheBlocksForFirstRound for instrI in cb)
@@ -586,90 +587,21 @@ class FrontEnd:
             self.IDQ.append(lamUop)
             lamUop.addedToIDQ = clock
 
-
    def findCacheableAddresses(self, cacheBlocksForFirstRound):
       for cacheBlock in cacheBlocksForFirstRound:
          if self.uArchConfig.DSBBlockSize == 32:
             splitCacheBlocks = [block for block in split64ByteBlockTo32ByteBlocks(cacheBlock) if block]
-            if self.uArchConfig.both32ByteBlocksMustBeCacheable and any((not self.canBeCached(block)) for block in splitCacheBlocks):
+            if self.uArchConfig.both32ByteBlocksMustBeCacheable and any((not canBeInDSB(block, self.uArchConfig.DSBBlockSize)) for block in splitCacheBlocks):
                return
          else:
             splitCacheBlocks = [cacheBlock]
 
          for block in splitCacheBlocks:
-            if self.canBeCached(block):
+            if canBeInDSB(block, self.uArchConfig.DSBBlockSize):
                for instrI in block:
                   self.addressesInDSB.add(instrI.address)
             else:
                return
-
-   def canBeCached(self, block):
-      if (self.uArchConfig.DSBBlockSize == 32) and len(self.getDSBBlocks(block)) > 3:
-         return False
-      if (self.uArchConfig.DSBBlockSize == 64) and len(self.getDSBBlocks(block)) > 6:
-         return False
-
-      if block[-1].instr.cannotBeInDSBDueToJCCErratum:
-         return False
-
-      if self.uArchConfig.DSBBlockSize == 32:
-         B32Blocks = [block]
-      else:
-         B32Blocks = split64ByteBlockTo32ByteBlocks(block)
-      for B32Block in B32Blocks:
-         B16_1, B16_2 = split32ByteBlockTo16ByteBlocks(B32Block)
-         if B16_1 and B16_2 and ((B16_1[-1].address % 16) + B16_1[-1].instr.posNominalOpcode >= 16):
-            B16_2.insert(0, B16_1.pop())
-         if (B16_1 and B16_1[-1].instr.lcpStall and B16_1[-1].instr.macroFusibleWith and
-               (len([instrI for instrI in B16_2 if instrI.instr.lcpStall and instrI.instr.macroFusibleWith]) >= 2)):
-            # if there are too many instructions with an lcpStall, the block cannot be cached
-            # ToDo: find out why this is and if the check above is always correct
-            return False
-
-      return True
-
-   def getDSBBlocks(self, cacheBlock):
-      # see https://www.agner.org/optimize/microarchitecture.pdf, Section 9.3
-      remainingEntriesInCurBlock = 0
-      DSBBlocks = []
-      for instrI in cacheBlock:
-         instr = instrI.instr
-         if instr.macroFusedWithPrevInstr:
-            continue
-
-         nRequiredEntries = max(1, instr.uopsMITE)
-         requiresExtraEntry = False
-         if (instr.immediate is not None):
-            if not (-2**31 <= instr.immediate < 2**31):
-               requiresExtraEntry = True
-            elif (not (-2**15 <= instr.immediate < 2**15) and len(instr.memAddrOperands) > 0):
-               requiresExtraEntry = True
-
-         if instr.uopsMS or (nRequiredEntries + int(requiresExtraEntry) > remainingEntriesInCurBlock):
-            curBlock = deque()
-            remainingEntriesInCurBlock = 6
-            DSBBlocks.append(curBlock)
-
-         if instr.uopsMITE:
-            for i, lamUop in enumerate(instrI.uops[:instr.uopsMITE]):
-               if i == instr.uopsMITE - 1:
-                  curBlock.append(DSBEntry(len(curBlock), instrI, lamUop, instrI.uops[instr.uopsMITE:], requiresExtraEntry))
-               else:
-                  curBlock.append(DSBEntry(len(curBlock), instrI, lamUop, [], False))
-               remainingEntriesInCurBlock -= 1
-         elif instr.uopsMS:
-            curBlock.append(DSBEntry(len(curBlock), instrI, None, list(instrI.uops), False))
-         else:
-            curBlock.append(DSBEntry(len(curBlock), instrI, None, [], False))
-            remainingEntriesInCurBlock -= 1
-
-         if requiresExtraEntry:
-            remainingEntriesInCurBlock -= 1
-         if instr.uopsMS:
-            remainingEntriesInCurBlock = 0
-
-      return DSBBlocks
-
 
    def addNewCacheBlock(self, cacheBlock):
       self.allGeneratedInstrInstances.extend(cacheBlock)
@@ -689,7 +621,7 @@ class FrontEnd:
             if block[0].address in self.addressesInDSB:
                for instrI in block:
                   instrI.source = 'DSB'
-               self.DSB.DSBBlockQueue += self.getDSBBlocks(block)
+               self.DSB.DSBBlockQueue += getDSBBlocks(block)
             else:
                for instrI in block:
                   instrI.source = 'MITE'
@@ -1802,6 +1734,76 @@ def CacheBlocksForNextRoundGenerator(instructions, alignmentOffset):
          cacheBlocks = []
          prevRnd = curRnd
       cacheBlocks.append(cacheBlock)
+
+
+def getDSBBlocks(cacheBlock):
+   # see https://www.agner.org/optimize/microarchitecture.pdf, Section 9.3
+   remainingEntriesInCurBlock = 0
+   DSBBlocks = []
+   for instrI in cacheBlock:
+      instr = instrI.instr
+      if instr.macroFusedWithPrevInstr:
+         continue
+
+      nRequiredEntries = max(1, instr.uopsMITE)
+      requiresExtraEntry = False
+      if (instr.immediate is not None):
+         if not (-2**31 <= instr.immediate < 2**31):
+            requiresExtraEntry = True
+         elif (not (-2**15 <= instr.immediate < 2**15) and len(instr.memAddrOperands) > 0):
+            requiresExtraEntry = True
+
+      if instr.uopsMS or (nRequiredEntries + int(requiresExtraEntry) > remainingEntriesInCurBlock):
+         curBlock = deque()
+         remainingEntriesInCurBlock = 6
+         DSBBlocks.append(curBlock)
+
+      if instr.uopsMITE:
+         for i, lamUop in enumerate(instrI.uops[:instr.uopsMITE]):
+            if i == instr.uopsMITE - 1:
+               curBlock.append(DSBEntry(len(curBlock), instrI, lamUop, instrI.uops[instr.uopsMITE:], requiresExtraEntry))
+            else:
+               curBlock.append(DSBEntry(len(curBlock), instrI, lamUop, [], False))
+            remainingEntriesInCurBlock -= 1
+      elif instr.uopsMS:
+         curBlock.append(DSBEntry(len(curBlock), instrI, None, list(instrI.uops), False))
+      else:
+         curBlock.append(DSBEntry(len(curBlock), instrI, None, [], False))
+         remainingEntriesInCurBlock -= 1
+
+      if requiresExtraEntry:
+         remainingEntriesInCurBlock -= 1
+      if instr.uopsMS:
+         remainingEntriesInCurBlock = 0
+
+   return DSBBlocks
+
+
+def canBeInDSB(block, DSBBlockSize):
+   if (DSBBlockSize == 32) and len(getDSBBlocks(block)) > 3:
+      return False
+   if (DSBBlockSize == 64) and len(getDSBBlocks(block)) > 6:
+      return False
+
+   if block[-1].instr.cannotBeInDSBDueToJCCErratum:
+      return False
+
+   if DSBBlockSize == 32:
+      B32Blocks = [block]
+   else:
+      B32Blocks = split64ByteBlockTo32ByteBlocks(block)
+   for B32Block in B32Blocks:
+      B16_1, B16_2 = split32ByteBlockTo16ByteBlocks(B32Block)
+      if B16_1 and B16_2 and ((B16_1[-1].address % 16) + B16_1[-1].instr.posNominalOpcode >= 16):
+         B16_2.insert(0, B16_1.pop())
+      if (B16_1 and B16_1[-1].instr.lcpStall and B16_1[-1].instr.macroFusibleWith and
+            (len([instrI for instrI in B16_2 if instrI.instr.lcpStall and instrI.instr.macroFusibleWith]) >= 2)):
+         # if there are too many instructions with an lcpStall, the block cannot be cached
+         # ToDo: find out why this is and if the check above is always correct
+         return False
+
+   return True
+
 
 TableLineData = NamedTuple('TableLineData', [('string', str), ('instr', Optional[Instr]), ('url', Optional[str]), ('uopsForRnd', List[List[LaminatedUop]])])
 
