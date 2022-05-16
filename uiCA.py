@@ -142,7 +142,8 @@ class Instr:
       self.cannotBeInDSBDueToJCCErratum = False
       self.UopPropertiesList = [] # list with UopProperties for each (unfused domain) uop
       self.regMergeUopPropertiesList = []
-      self.isFirstInstruction = False
+      self.isNextToLastInstr = False
+      self.isLastInstr = False
 
    def __repr__(self):
        return "Instr: " + str(self.__dict__)
@@ -150,6 +151,8 @@ class Instr:
    def canBeUsedByLSD(self):
       return not (self.uopsMS or self.implicitRSPChange or any((op.reg in High8Regs) for op in self.outputRegOperands))
 
+   def isLastDecodedInstr(self):
+      return (self.isNextToLastInstr and self.macroFusedWithNextInstr) or self.isLastInstr
 
 class UnknownInstr(Instr):
    def __init__(self, asm, opcode, posNominalOpcode):
@@ -567,7 +570,7 @@ class FrontEnd:
             newUops = [u for _, u in newInstrIUops if u is not None]
             if not self.unroll and newInstrIUops:
                curInstrI = newInstrIUops[-1][0]
-               if curInstrI.instr.isBranchInstr or curInstrI.instr.macroFusedWithNextInstr:
+               if curInstrI.instr.isLastDecodedInstr() and (curInstrI.instr.isBranchInstr or curInstrI.instr.macroFusedWithNextInstr):
                   if self.alignmentOffset in self.addressesInDSB:
                      self.uopSource = 'DSB'
          elif self.uopSource == 'DSB':
@@ -575,7 +578,7 @@ class FrontEnd:
             newUops = [u for _, u in newInstrIUops if u is not None]
             if newUops and newUops[-1].getUnfusedUops()[-1].prop.isLastUopOfInstr:
                curInstrI = newInstrIUops[-1][0]
-               if curInstrI.instr.isBranchInstr or curInstrI.instr.macroFusedWithNextInstr:
+               if curInstrI.instr.isLastDecodedInstr():
                   nextAddr = self.alignmentOffset
                else:
                   nextAddr = curInstrI.address + (len(curInstrI.instr.opcode) // 2)
@@ -689,7 +692,7 @@ class DSB:
                DSBBlock = self.DSBBlockQueue[0]
                prevInstrI = retList[-1][0]
                if ((prevInstrI.address + len(prevInstrI.instr.opcode)/2 != DSBBlock[0].instrI.address) and
-                     not (prevInstrI.instr.isBranchInstr or prevInstrI.instr.macroFusedWithNextInstr)):
+                     not prevInstrI.instr.isLastDecodedInstr()):
                   # next instr not in DSB
                   return retList
             else:
@@ -718,8 +721,7 @@ class DSB:
             if remainingSlots and self.DSBBlockQueue and (self.uArchConfig.DSBWidth == 6):
                nextInstrAddr = self.DSBBlockQueue[0][0].instrI.address
                nextInstrInSameMemoryBlock = (nextInstrAddr//self.uArchConfig.DSBBlockSize == entry.instrI.address//self.uArchConfig.DSBBlockSize)
-               isBranchInstr = (entry.instrI.instr.isBranchInstr or entry.instrI.instr.macroFusedWithNextInstr)
-               if (self.uArchConfig.DSBBlockSize == 32) and nextInstrInSameMemoryBlock and isBranchInstr and (not delayInPrevCycle):
+               if (self.uArchConfig.DSBBlockSize == 32) and nextInstrInSameMemoryBlock and entry.instrI.instr.isLastDecodedInstr() and (not delayInPrevCycle):
                   remainingSlots = 0
                elif not nextInstrInSameMemoryBlock:
                   if newDSBBlockStarted:
@@ -729,7 +731,7 @@ class DSB:
                         remainingSlots = 2
                      elif len(retList) == 5:
                         remainingSlots = 1
-                  elif isBranchInstr:
+                  elif entry.instrI.instr.isLastDecodedInstr():
                      if (len(retList) == 1) or ((len(retList) == 2) and (entry.slot >= 4)):
                         remainingSlots = 4
                      else:
@@ -1629,8 +1631,6 @@ def getInstructions(disas, uArchConfig: MicroArchConfig, archData, alignmentOffs
                      del prevInstr.portData[p]
                      prevInstr.portData[instrPorts] = u
                      break
-      else:
-         instruction.isFirstInstruction = True
 
       # JCC erratum
       if not uArchConfig.branchCanBeLastInstrInCachedBlock:
@@ -1643,6 +1643,12 @@ def getInstructions(disas, uArchConfig: MicroArchConfig, archData, alignmentOffs
                prevInstr.cannotBeInDSBDueToJCCErratum = True
 
       instructions.append(instruction)
+
+   if len(instructions) > 0:
+      instructions[-1].isLastInstr = True
+   if len(instructions) > 1:
+      instructions[-2].isNextToLastInstr = True
+
    return instructions
 
 
@@ -2298,7 +2304,7 @@ def runSimulation(disas, uArchConfig: MicroArchConfig, alignmentOffset, initPoli
          break
       clock += 1
 
-   lastApplicableInstr = [instr for instr in instructions if not instr.macroFusedWithPrevInstr][-1] # ignore macro-fused instr.
+   lastApplicableInstr = next(instr for instr in instructions if instr.isLastDecodedInstr()) # ignore macro-fused instr.
    firstRelevantRound = len(uopsForRound) // 2
    lastRelevantRound = len(uopsForRound) - 2 # last round may be incomplete, thus -2
    if lastRelevantRound - firstRelevantRound > 10:
