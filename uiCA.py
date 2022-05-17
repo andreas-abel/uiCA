@@ -977,6 +977,12 @@ class Scheduler:
             else:
                applicablePorts.remove('4')
 
+      if self.uArchConfig.slow256BitLoads and self.readyQueue['2'] and self.readyQueue['3']:
+         uop2 = self.readyQueue['2'][0][1]
+         uop3 = self.readyQueue['3'][0][1]
+         if uop2.prop.isLoadUop and uop3.prop.isLoadUop and (('M256' in uop2.instrI.instr.instrStr) or ('M256' in uop3.instrI.instr.instrStr)):
+            applicablePorts.remove('3' if uop2.idx < uop3.idx else '2')
+
       uopsDispatched = []
       for port in applicablePorts:
          queue = self.readyQueue[port]
