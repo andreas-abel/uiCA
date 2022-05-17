@@ -36,7 +36,7 @@ class MicroArchConfig:
       self.LSDEnabled = LSDEnabled
       self.LSDUnrolling = LSDUnrolling
       self.fastPointerChasing = fastPointerChasing
-      self.slow256BitLoads = slow256BitLoads # after a 256-bit load, no other load can be executed on the same port in the next cycle
+      self.slow256BitLoads = slow256BitLoads # no other load can be dispatched in a cycle in which a 256-bit load is dispatched
       self.DSBBlockSize = DSBBlockSize
       self.simplePortAssignment = simplePortAssignment # assign ports with equal probability
 
