@@ -930,7 +930,6 @@ class Scheduler:
       self.nextP49Port = '4'
       self.nextP78Port = '7'
       self.uopsDispatchedInPrevCycle = [] # the port usage counter is decreased one cycle after uops are dispatched
-      self.divBusy = 0
       self.readyQueue = {p:[] for p in allPorts[self.uArchConfig.name]}
       self.readyDivUops = []
       self.uopsReadyInCycle = {}
@@ -941,13 +940,13 @@ class Scheduler:
       self.pendingLoadFenceUops = deque()
       self.loadUopsSinceLastLoadFence = []
       self.blockedResources = dict() # for how many remaining cycle a resource will be blocked
+      self.blockedResources['div'] = 0
       self.dependentUops = dict() # uops that have an operand that is written by a non-executed uop
 
    def isFull(self):
       return len(self.uops) + self.uArchConfig.issueWidth > self.uArchConfig.RSWidth
 
    def cycle(self, clock, newUops):
-      self.divBusy = max(0, self.divBusy-1)
       if clock in self.uopsReadyInCycle:
          for uop in self.uopsReadyInCycle[clock]:
             if uop.prop.divCycles:
@@ -981,7 +980,8 @@ class Scheduler:
       uopsDispatched = []
       for port in applicablePorts:
          queue = self.readyQueue[port]
-         if port == '0' and (not self.divBusy) and self.readyDivUops and ((not self.readyQueue['0']) or self.readyDivUops[0][0] < self.readyQueue['0'][0][0]):
+         if (port == '0' and (not self.blockedResources['div']) and self.readyDivUops
+               and ((not self.readyQueue['0']) or self.readyDivUops[0][0] < self.readyQueue['0'][0][0])):
             queue = self.readyDivUops
          if not queue:
             continue
@@ -989,7 +989,7 @@ class Scheduler:
          uop = heappop(queue)[1]
 
          uop.dispatched = clock
-         self.divBusy += uop.prop.divCycles
+         self.blockedResources['div'] += uop.prop.divCycles
          self.uops.remove(uop)
          uopsDispatched.append(uop)
          self.pendingUops.add(uop)
