@@ -6,7 +6,7 @@ class MicroArchConfig:
                 macroFusibleInstrCanBeDecodedAsLastInstr, branchCanBeLastInstrInCachedBlock, both32ByteBlocksMustBeCacheable=False, nDecoders=4,
                 preDecodeWidth=5, predecodeDecodeDelay=3, issueDispatchDelay=5, DSB_MS_Stall=4, pop5CEndsDecodeGroup=True, high8RenamedSeparately=True,
                 movzxHigh8AliasCanBeEliminated=True, moveEliminationPipelineLength=2, moveEliminationGPRSlots=4, moveEliminationSIMDSlots=4,
-                moveEliminationGPRAllAliasesMustBeOverwritten=True, LSDEnabled=True, LSDUnrolling={}, fastPointerChasing=True, slow256BitLoads=False,
+                moveEliminationGPRAllAliasesMustBeOverwritten=True, LSDEnabled=True, LSDUnrolling={}, fastPointerChasing=True, slow256BitMemAcc=False,
                 DSBBlockSize=32, simplePortAssignment=False):
       self.name = name
       self.XEDName = XEDName # see obj/wkit/bin/xed -chip-check-list
@@ -36,7 +36,7 @@ class MicroArchConfig:
       self.LSDEnabled = LSDEnabled
       self.LSDUnrolling = LSDUnrolling
       self.fastPointerChasing = fastPointerChasing
-      self.slow256BitLoads = slow256BitLoads # no other load can be dispatched in a cycle in which a 256-bit load is dispatched
+      self.slow256BitMemAcc = slow256BitMemAcc # 256-bit memory load/store uops block the load/store units twice
       self.DSBBlockSize = DSBBlockSize
       self.simplePortAssignment = simplePortAssignment # assign ports with equal probability
 
@@ -125,7 +125,7 @@ MicroArchConfigs['IVB'] = MicroArchConfig( # https://en.wikichip.org/wiki/intel/
    moveEliminationPipelineLength = 3,
    moveEliminationGPRAllAliasesMustBeOverwritten = False,
    LSDUnrolling = {},
-   slow256BitLoads = True
+   slow256BitMemAcc = True
 )
 
 MicroArchConfigs['SNB'] = copy.deepcopy(MicroArchConfigs['IVB'])

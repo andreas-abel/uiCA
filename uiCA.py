@@ -977,7 +977,7 @@ class Scheduler:
             else:
                applicablePorts.remove('4')
 
-      if self.uArchConfig.slow256BitLoads and self.readyQueue['2'] and self.readyQueue['3']:
+      if self.uArchConfig.slow256BitMemAcc and self.readyQueue['2'] and self.readyQueue['3']:
          uop2 = self.readyQueue['2'][0][1]
          uop3 = self.readyQueue['3'][0][1]
          if uop2.prop.isLoadUop and uop3.prop.isLoadUop and (('M256' in uop2.instrI.instr.instrStr) or ('M256' in uop3.instrI.instr.instrStr)):
@@ -989,16 +989,21 @@ class Scheduler:
          if (port == '0' and (not self.blockedResources['div']) and self.readyDivUops
                and ((not self.readyQueue['0']) or self.readyDivUops[0][0] < self.readyQueue['0'][0][0])):
             queue = self.readyDivUops
+         if self.blockedResources.get('port' + port):
+            continue
          if not queue:
             continue
 
          uop = heappop(queue)[1]
 
          uop.dispatched = clock
-         self.blockedResources['div'] += uop.prop.divCycles
          self.uops.remove(uop)
          uopsDispatched.append(uop)
          self.pendingUops.add(uop)
+
+         self.blockedResources['div'] += uop.prop.divCycles
+         if self.uArchConfig.slow256BitMemAcc and (port == '4') and ('M256' in uop.instrI.instr.instrStr):
+            self.blockedResources['port' + port] = 2
 
       for uop in self.uopsDispatchedInPrevCycle:
          self.portUsage[uop.actualPort] -= 1
