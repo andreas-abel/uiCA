@@ -8,7 +8,7 @@ from collections import Counter, deque, namedtuple, OrderedDict
 from concurrent import futures
 from heapq import heappop, heappush
 from itertools import count, repeat
-from typing import List, Set, Dict, NamedTuple, Optional
+from typing import List, Set, Dict, NamedTuple, Optional, Callable
 
 import random
 random.seed(0)
@@ -219,27 +219,69 @@ class RenamedOperand:
 
 
 AbstractValue = namedtuple('AbstractValue', ['base', 'offset'])
+class AbstractValueGenerator:
+   def __init__(self, initPolicy):
+      self.initPolicy = initPolicy
+      self.abstractValueBaseGenerator = count(0)
+      self.initValue = self.__generateFreshAbstractValue()
+      self.abstractValueDict = {}
+      if initPolicy == 'stack':
+         self.abstractValueDict['RSP'] = self.__generateFreshAbstractValue()
+         self.abstractValueDict['RBP'] = self.__generateFreshAbstractValue()
+      self.curInstrRndAbstractValueDict = {}
+
+   def getAbstractValueForReg(self, reg):
+      if reg is None:
+         return None
+      key = getCanonicalReg(reg)
+      if not key in self.abstractValueDict:
+         if self.initPolicy == 'diff':
+            self.abstractValueDict[key] = self.__generateFreshAbstractValue()
+         else:
+            self.abstractValueDict[key] = self.initValue
+      return self.abstractValueDict[key]
+
+   def setAbstractValueForCurInstr(self, key, instr: Instr):
+      self.curInstrRndAbstractValueDict[key] = self.__computeAbstractValue(instr)
+
+   def finishCurInstr(self):
+      self.abstractValueDict.update(self.curInstrRndAbstractValueDict)
+      self.curInstrRndAbstractValueDict.clear()
+
+   def __generateFreshAbstractValue(self):
+      return AbstractValue(next(self.abstractValueBaseGenerator), 0)
+
+   def __computeAbstractValue(self, instr: Instr):
+      if instr.inputRegOperands:
+         absVal = self.getAbstractValueForReg(instr.inputRegOperands[0].reg)
+         if 'MOV' in instr.instrStr and not 'CMOV' in instr.instrStr:
+            return absVal
+         elif ('ADD' in instr.instrStr) and (instr.immediate is not None):
+            return AbstractValue(absVal.base, absVal.offset + instr.immediate)
+         elif ('SUB' in instr.instrStr) and (instr.immediate is not None):
+            return AbstractValue(absVal.base, absVal.offset - instr.immediate)
+         elif ('INC' in instr.instrStr):
+            return AbstractValue(absVal.base, absVal.offset + 1)
+         elif ('DEC' in instr.instrStr):
+            return AbstractValue(absVal.base, absVal.offset - 1)
+         else:
+            return self.__generateFreshAbstractValue()
+      else:
+         return self.__generateFreshAbstractValue()
+
 
 class Renamer:
    def __init__(self, IDQ, reorderBuffer, uArchConfig: MicroArchConfig, initPolicy):
       self.IDQ = IDQ
       self.reorderBuffer = reorderBuffer
       self.uArchConfig = uArchConfig
-      self.initPolicy = initPolicy
+      self.absValGen = AbstractValueGenerator(initPolicy)
 
       self.renameDict = {}
 
       # renamed operands written by current instr.
       self.curInstrRndRenameDict = {}
       self.curInstrPseudoOpDict = {}
-
-      self.abstractValueBaseGenerator = count(0)
-      self.initValue = self.generateFreshAbstractValue()
-      self.abstractValueDict = {}
-      if initPolicy == 'stack':
-         self.abstractValueDict['RSP'] = self.generateFreshAbstractValue()
-         self.abstractValueDict['RBP'] = self.generateFreshAbstractValue()
-      self.curInstrRndAbstractValueDict = {}
 
       self.nGPRMoveElimInCycle = {}
       self.multiUseGPRDict = {}
@@ -340,7 +382,7 @@ class Renamer:
                curMultiUseDict[renamedReg].update([canonicalInpReg, canonicalOutReg])
 
                key = self.getRenameDictKey(uop.prop.instr.outputRegOperands[0])
-               self.curInstrRndAbstractValueDict[key] = self.computeAbstractValue(uop.prop.instr)
+               self.absValGen.setAbstractValueForCurInstr(key, uop.prop.instr)
             else:
                if uop.prop.instr.uops or isinstance(uop, StackSyncUop):
                   if uop.prop.isStoreAddressUop:
@@ -372,7 +414,7 @@ class Renamer:
                         key = self.getRenameDictKey(outOp)
                         self.curInstrRndRenameDict[key] = renOp
                         if isinstance(outOp, RegOperand):
-                           self.curInstrRndAbstractValueDict[key] = self.computeAbstractValue(uop.prop.instr)
+                           self.absValGen.setAbstractValueForCurInstr(key, uop.prop.instr)
                else:
                   # e.g., xor rax, rax
                   for op in uop.prop.instr.outputRegOperands:
@@ -390,9 +432,8 @@ class Renamer:
                               self.multiUseSIMDDict[prevRenOp].remove(key)
 
                self.renameDict.update(self.curInstrRndRenameDict)
-               self.abstractValueDict.update(self.curInstrRndAbstractValueDict)
+               self.absValGen.finishCurInstr()
                self.curInstrRndRenameDict.clear()
-               self.curInstrRndAbstractValueDict.clear()
                self.curInstrPseudoOpDict.clear()
 
       self.nGPRMoveElimInCycle[self.renamerActiveCycle] = nGPRMoveElim
@@ -423,39 +464,8 @@ class Renamer:
    def getStoreBufferKey(self, memAddr):
       if memAddr is None:
          return None
-      return (self.getAbstractValueForReg(memAddr.get('base')), self.getAbstractValueForReg(memAddr.get('index')), memAddr.get('scale'), memAddr.get('disp'))
-
-   def generateFreshAbstractValue(self):
-      return AbstractValue(next(self.abstractValueBaseGenerator), 0)
-
-   def getAbstractValueForReg(self, reg):
-      if reg is None:
-         return None
-      key = getCanonicalReg(reg)
-      if not key in self.abstractValueDict:
-         if self.initPolicy == 'diff':
-            self.abstractValueDict[key] = self.generateFreshAbstractValue()
-         else:
-            self.abstractValueDict[key] = self.initValue
-      return self.abstractValueDict[key]
-
-   def computeAbstractValue(self, instr: Instr):
-      if instr.inputRegOperands:
-         absVal = self.getAbstractValueForReg(instr.inputRegOperands[0].reg)
-         if 'MOV' in instr.instrStr and not 'CMOV' in instr.instrStr:
-            return absVal
-         elif ('ADD' in instr.instrStr) and (instr.immediate is not None):
-            return AbstractValue(absVal.base, absVal.offset + instr.immediate)
-         elif ('SUB' in instr.instrStr) and (instr.immediate is not None):
-            return AbstractValue(absVal.base, absVal.offset - instr.immediate)
-         elif ('INC' in instr.instrStr):
-            return AbstractValue(absVal.base, absVal.offset + 1)
-         elif ('DEC' in instr.instrStr):
-            return AbstractValue(absVal.base, absVal.offset - 1)
-         else:
-            return self.generateFreshAbstractValue()
-      else:
-         return self.generateFreshAbstractValue()
+      return (self.absValGen.getAbstractValueForReg(memAddr.get('base')), self.absValGen.getAbstractValueForReg(memAddr.get('index')),
+              memAddr.get('scale'), memAddr.get('disp'))
 
 
 class FrontEnd:
@@ -848,22 +858,24 @@ class PreDecoder:
                self.partialInstrI = None
 
             if not self.curBlock:
-               if not self.B16BlockQueue:
+               if len(self.B16BlockQueue) < self.uArchConfig.preDecodeBlockSize // 16:
                   return
-               self.curBlock = self.B16BlockQueue.popleft()
+               self.curBlock = deque()
+               for _ in range(self.uArchConfig.preDecodeBlockSize // 16):
+                  self.curBlock.extend(self.B16BlockQueue.popleft())
                self.stalled = max(0, sum(3 for ii in self.curBlock if ii.instr.lcpStall) - max(0, self.nonStalledPredecCyclesForCurBlock - 1))
                self.nonStalledPredecCyclesForCurBlock = 0
 
             while self.curBlock and len(self.preDecQueue) < self.uArchConfig.preDecodeWidth:
-               if instrInstanceCrosses16ByteBoundary(self.curBlock[0]):
+               if instrInstanceCrossesPredecBlockBoundary(self.curBlock[0], self.uArchConfig.preDecodeBlockSize):
                   break
                self.preDecQueue.append(self.curBlock.popleft())
 
             if len(self.curBlock) == 1:
                instrI = self.curBlock[0]
-               if instrInstanceCrosses16ByteBoundary(instrI):
+               if instrInstanceCrossesPredecBlockBoundary(instrI, self.uArchConfig.preDecodeBlockSize):
                   offsetOfNominalOpcode = (instrI.address % 16) + instrI.instr.posNominalOpcode
-                  if (len(self.preDecQueue) < 5) or (offsetOfNominalOpcode >= 16):
+                  if (len(self.preDecQueue) < self.uArchConfig.preDecodeWidth) or (offsetOfNominalOpcode >= 16):
                      self.partialInstrI = instrI
                      self.curBlock.popleft()
 
@@ -1116,7 +1128,7 @@ class Scheduler:
             elif len(allPorts[self.uArchConfig.name]) == 10:
                applicablePortUsages = [(p,u) for p, u in self.portUsageAtStartOfCycle.get(clock-1, self.portUsageAtStartOfCycle[clock]).items()
                                        if p in uop.prop.possiblePorts]
-               sortedPortUsages = sorted(applicablePortUsages, key=lambda x: (x[1], -int(x[0])))
+               sortedPortUsages = sorted(applicablePortUsages, key=lambda x: (x[1], -int(x[0], 16)))
                minPortUsage = sortedPortUsages[0][1]
                sortedPorts = [p for p, u in sortedPortUsages if u < minPortUsage + 5]
 
@@ -1141,7 +1153,7 @@ class Scheduler:
                   port = sortedPorts[nPC % len(sortedPorts)]
             elif len(allPorts[self.uArchConfig.name]) == 8:
                applicablePortUsages = [(p,u) for p, u in self.portUsageAtStartOfCycle[clock].items() if p in uop.prop.possiblePorts]
-               minPort, minPortUsage = min(applicablePortUsages, key=lambda x: (x[1], -int(x[0]))) # port with minimum usage so far
+               minPort, minPortUsage = min(applicablePortUsages, key=lambda x: (x[1], -int(x[0], 16))) # port with minimum usage so far
 
                if uop.prop.possiblePorts == ['2', '3']:
                   port = self.nextP23Port
@@ -1150,14 +1162,14 @@ class Scheduler:
                   port = minPort
                else:
                   remApplicablePortUsages = [(p, u) for p, u in applicablePortUsages if p != minPort]
-                  min2Port, min2PortUsage = min(remApplicablePortUsages, key=lambda x: (x[1], -int(x[0]))) # port with second smallest usage so far
+                  min2Port, min2PortUsage = min(remApplicablePortUsages, key=lambda x: (x[1], -int(x[0], 16))) # port with second smallest usage so far
                   if min2PortUsage >= minPortUsage + 3:
                      port = minPort
                   else:
                      port = min2Port
             else:
                applicablePortUsages = [(p,u) for p, u in self.portUsageAtStartOfCycle[clock].items() if p in uop.prop.possiblePorts]
-               minPort, minPortUsage = min(applicablePortUsages, key=lambda x: (x[1], int(x[0])))
+               minPort, minPortUsage = min(applicablePortUsages, key=lambda x: (x[1], int(x[0], 16)))
 
                if uop.prop.possiblePorts == ['2', '3']:
                   port = self.nextP23Port
@@ -1175,7 +1187,7 @@ class Scheduler:
                   if issueSlot % 2 == 0:
                      port = minPort
                   else:
-                     maxPort, _ = max(applicablePortUsages, key=lambda x: (x[1], int(x[0])))
+                     maxPort, _ = max(applicablePortUsages, key=lambda x: (x[1], int(x[0], 16)))
                      port = maxPort
 
             uop.actualPort = port
@@ -1216,6 +1228,16 @@ class Scheduler:
       return max(clock + 1, readyCycle)
 
 
+def latReducedDueToFastPtrChasing(memAddr: Dict, instrForLastWriteToReg: Callable[[str], Instr]):
+   if (memAddr is not None) and (memAddr.get('base') is not None) and (0 <= memAddr['disp'] < 2048):
+      lastWriteBase = instrForLastWriteToReg(getCanonicalReg(memAddr['base']))
+      lastWriteIndex = instrForLastWriteToReg(getCanonicalReg(memAddr['index'])) if ('index' in memAddr) else None
+      return ((lastWriteBase is not None) and (lastWriteBase.instrStr in ['MOV (R64, M64)', 'MOV (RAX, M64)', 'MOV (R32, M32)',
+                                                                          'MOV (EAX, M32)', 'MOVSXD (R64, M32)', 'POP (R64)'])
+             and (('index' not in memAddr) or ((lastWriteIndex is not None) and (lastWriteIndex.uops == 0))))
+   return False
+
+
 # must only be called once for a given list of instructions
 def adjustLatenciesAndAddMergeUops(instructions, uArchConfig: MicroArchConfig):
    prevWriteToReg = dict() # reg -> instr
@@ -1247,17 +1269,9 @@ def adjustLatenciesAndAddMergeUops(instructions, uArchConfig: MicroArchConfig):
       processInstrRegOutputs(instr)
    for instr in instructions:
       for uop in instr.UopPropertiesList:
-         if uArchConfig.fastPointerChasing and (uop.isLoadUop or uop.isStoreAddressUop):
-            memAddr = uop.memAddr
-            if (memAddr is not None) and (memAddr.get('base') is not None) and (0 <= memAddr['disp'] < 2048):
-               canonicalBaseReg = getCanonicalReg(memAddr['base'])
-               canonicalIndexReg = getCanonicalReg(memAddr['index']) if ('index' in memAddr) else None
-               if ((canonicalBaseReg in prevWriteToReg) and (prevWriteToReg[canonicalBaseReg].instrStr in ['MOV (R64, M64)', 'MOV (RAX, M64)',
-                                                                                                          'MOV (R32, M32)', 'MOV (EAX, M32)',
-                                                                                                          'MOVSXD (R64, M32)', 'POP (R64)'])
-                     and ((canonicalIndexReg is None) or ((canonicalIndexReg in prevWriteToReg) and (prevWriteToReg[canonicalIndexReg].uops == 0)))):
-                  for k in list(uop.latencies.keys()):
-                     uop.latencies[k] -= 1
+         if uArchConfig.fastPointerChasing and (uop.isLoadUop or uop.isStoreAddressUop) and latReducedDueToFastPtrChasing(uop.memAddr, prevWriteToReg.get):
+            for k in list(uop.latencies.keys()):
+               uop.latencies[k] -= 1
 
       if uArchConfig.high8RenamedSeparately:
          for uop in instr.UopPropertiesList:
@@ -1715,9 +1729,9 @@ def split32ByteBlockTo16ByteBlocks(B32Block):
 def split64ByteBlockTo32ByteBlocks(cacheBlock):
    return [[ii for ii in cacheBlock if b*32 <= ii.address % 64 < (b+1)*32 ] for b in range(0,2)]
 
-def instrInstanceCrosses16ByteBoundary(instrI):
+def instrInstanceCrossesPredecBlockBoundary(instrI, blockSize):
    instrLen = len(instrI.instr.opcode)/2
-   return (instrI.address % 16) + instrLen > 16
+   return (instrI.address % blockSize) + instrLen > blockSize
 
 # returns list of instrInstances corresponding to the next 64-Byte cache block
 def CacheBlockGenerator(instructions, unroll, alignmentOffset):

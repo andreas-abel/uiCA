@@ -4,10 +4,10 @@ from typing import Dict
 class MicroArchConfig:
    def __init__(self, name, XEDName, IQWidth, DSBWidth, IDQWidth, issueWidth, RBWidth, RSWidth, retireWidth, pop5CRequiresComplexDecoder,
                 macroFusibleInstrCanBeDecodedAsLastInstr, branchCanBeLastInstrInCachedBlock, both32ByteBlocksMustBeCacheable=False, nDecoders=4,
-                preDecodeWidth=5, predecodeDecodeDelay=3, issueDispatchDelay=5, DSB_MS_Stall=4, pop5CEndsDecodeGroup=True, high8RenamedSeparately=True,
-                movzxHigh8AliasCanBeEliminated=True, moveEliminationPipelineLength=2, moveEliminationGPRSlots=4, moveEliminationSIMDSlots=4,
-                moveEliminationGPRAllAliasesMustBeOverwritten=True, LSDEnabled=True, LSDUnrolling={}, fastPointerChasing=True, slow256BitMemAcc=False,
-                DSBBlockSize=32, simplePortAssignment=False):
+                preDecodeWidth=5, preDecodeBlockSize=16, predecodeDecodeDelay=3, issueDispatchDelay=5, DSB_MS_Stall=4, pop5CEndsDecodeGroup=True,
+                high8RenamedSeparately=True, movzxHigh8AliasCanBeEliminated=True, moveEliminationPipelineLength=2, moveEliminationGPRSlots=4,
+                moveEliminationSIMDSlots=4, moveEliminationGPRAllAliasesMustBeOverwritten=True, LSDEnabled=True, LSDUnrolling={}, fastPointerChasing=True,
+                slow256BitMemAcc=False, DSBBlockSize=32, simplePortAssignment=False):
       self.name = name
       self.XEDName = XEDName # see obj/wkit/bin/xed -chip-check-list
       self.IQWidth = IQWidth # width of the instruction queue
@@ -23,6 +23,7 @@ class MicroArchConfig:
       self.both32ByteBlocksMustBeCacheable = both32ByteBlocksMustBeCacheable # a 32 byte block can only be in the DSB if the other 32 byte block in the same 64 byte block is also cacheable
       self.nDecoders = nDecoders # number of decoders
       self.preDecodeWidth = preDecodeWidth # number of instructions that can be predecoded per cycle
+      self.preDecodeBlockSize = preDecodeBlockSize # block size of the predecoder
       self.predecodeDecodeDelay = predecodeDecodeDelay # minimum delay between predecoding and decoding
       self.issueDispatchDelay = issueDispatchDelay # minimum delay between issuing and dispatching
       self.DSB_MS_Stall = DSB_MS_Stall # number of stall cycles when switching from DSB to MS
