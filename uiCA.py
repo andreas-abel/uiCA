@@ -51,6 +51,7 @@ class Uop:
       self.renamedInputOperands: List[RenamedOperand] = []
       self.renamedOutputOperands: List[RenamedOperand] = []
       self.storeBufferEntry = None
+      self.latReducedDueToFastPtrChasing = False
       self.readyForDispatch = None
       self.dispatched = None
       self.executed = None
@@ -189,22 +190,21 @@ class StoreBufferEntry:
       self.dataReadyCycle = None
 
 class RenamedOperand:
-   def __init__(self, nonRenamedOperand=None, uop=None):
+   def __init__(self, nonRenamedOperand=None, uop=None, ready=None):
       self.nonRenamedOperand = nonRenamedOperand
       self.uop = uop # uop that writes this operand
-      self.__ready = None # cycle in which operand becomes ready
+      self.__ready = ready # cycle in which operand becomes ready
 
    def getReadyCycle(self):
       if self.__ready is not None:
-         return self.__ready
-      if self.uop is None:
-         self.__ready = -1
          return self.__ready
 
       if self.uop.dispatched is None:
          return None
 
       lat = self.uop.prop.latencies.get(self.nonRenamedOperand, 1)
+      if self.uop.latReducedDueToFastPtrChasing:
+         lat -= 1
 
       if self.uop.prop.isLoadUop and (self.uop.storeBufferEntry is not None):
          sb = self.uop.storeBufferEntry
@@ -270,6 +270,7 @@ class AbstractValueGenerator:
          return self.__generateFreshAbstractValue()
 
 
+RenameDictEntry = namedtuple('RenameDictEntry', ['renamedOp', 'renamedByElim32BitMove'], defaults=[False])
 class Renamer:
    def __init__(self, IDQ, reorderBuffer, uArchConfig: MicroArchConfig, initPolicy):
       self.IDQ = IDQ
@@ -367,6 +368,7 @@ class Renamer:
       for fusedUop in renamerUops:
          for uop in fusedUop.getUnfusedUops():
             if uop.eliminated:
+               is32BitMove = (getRegSize(uop.prop.instr.outputRegOperands[0].reg) == 32)
                canonicalInpReg = getCanonicalReg(uop.prop.instr.inputRegOperands[0].reg)
                canonicalOutReg = getCanonicalReg(uop.prop.instr.outputRegOperands[0].reg)
 
@@ -375,11 +377,11 @@ class Renamer:
                else:
                   curMultiUseDict = self.multiUseSIMDDict
 
-               renamedReg = self.renameDict.setdefault(canonicalInpReg, RenamedOperand())
-               self.curInstrRndRenameDict[canonicalOutReg] = renamedReg
-               if not renamedReg in curMultiUseDict:
-                  curMultiUseDict[renamedReg] = set()
-               curMultiUseDict[renamedReg].update([canonicalInpReg, canonicalOutReg])
+               entry = self.renameDict.setdefault(canonicalInpReg, RenameDictEntry(RenamedOperand(ready=-1)))
+               self.curInstrRndRenameDict[canonicalOutReg] = RenameDictEntry(entry.renamedOp, is32BitMove)
+               if not entry.renamedOp in curMultiUseDict:
+                  curMultiUseDict[entry.renamedOp] = set()
+               curMultiUseDict[entry.renamedOp].update([canonicalInpReg, canonicalOutReg])
 
                key = self.getRenameDictKey(uop.prop.instr.outputRegOperands[0])
                self.absValGen.setAbstractValueForCurInstr(key, uop.prop.instr)
@@ -394,6 +396,14 @@ class Renamer:
                      self.curStoreBufferEntry.uops.append(uop)
                   if uop.prop.isLoadUop:
                      key = self.getStoreBufferKey(uop.prop.memAddr)
+                     baseReg = uop.prop.memAddr.get('base')
+                     baseEntry = self.renameDict.get(getCanonicalReg(baseReg)) if baseReg else None
+                     baseInstr = baseEntry.renamedOp.uop.prop.instr if baseEntry and baseEntry.renamedOp.uop else None
+                     indexReg = uop.prop.memAddr.get('index')
+                     indexEntry = self.renameDict.get(getCanonicalReg(indexReg)) if indexReg else None
+                     indexInstr = indexEntry.renamedOp.uop.prop.instr if indexEntry and indexEntry.renamedOp.uop else None
+                     uop.latReducedDueToFastPtrChasing = latReducedDueToFastPtrChasing(self.uArchConfig, uop.prop.memAddr, baseInstr, indexInstr,
+                                                                                       (baseEntry and baseEntry.renamedByElim32BitMove))
                      uop.storeBufferEntry = self.storeBufferEntryDict.get(key, None)
 
                   for inpOp in uop.prop.inputOperands:
@@ -401,9 +411,7 @@ class Renamer:
                         renOp = self.curInstrPseudoOpDict[inpOp]
                      else:
                         key = self.getRenameDictKey(inpOp)
-                        if key not in self.renameDict:
-                           self.renameDict[key] = RenamedOperand(inpOp)
-                        renOp = self.renameDict[key]
+                        renOp = self.renameDict.setdefault(key, RenameDictEntry(RenamedOperand(ready=-1))).renamedOp
                      uop.renamedInputOperands.append(renOp)
                   for outOp in uop.prop.outputOperands:
                      renOp = RenamedOperand(outOp, uop)
@@ -412,19 +420,19 @@ class Renamer:
                         self.curInstrPseudoOpDict[outOp] = renOp
                      else:
                         key = self.getRenameDictKey(outOp)
-                        self.curInstrRndRenameDict[key] = renOp
+                        self.curInstrRndRenameDict[key] = RenameDictEntry(renOp)
                         if isinstance(outOp, RegOperand):
                            self.absValGen.setAbstractValueForCurInstr(key, uop.prop.instr)
                else:
                   # e.g., xor rax, rax
                   for op in uop.prop.instr.outputRegOperands:
-                     self.curInstrRndRenameDict[getCanonicalReg(op.reg)] = RenamedOperand()
+                     self.curInstrRndRenameDict[getCanonicalReg(op.reg)] = RenameDictEntry(RenamedOperand(uop=uop, ready=-1))
 
             if uop.prop.isLastUopOfInstr or uop.prop.isRegMergeUop or isinstance(uop, StackSyncUop):
                for key in self.curInstrRndRenameDict:
                   if key in self.renameDict:
-                     prevRenOp = self.renameDict[key]
-                     if (not uop.eliminated) or (prevRenOp != self.curInstrRndRenameDict[key]):
+                     prevRenOp = self.renameDict[key].renamedOp
+                     if (not uop.eliminated) or (prevRenOp != self.curInstrRndRenameDict[key].renamedOp):
                         if (key in GPRegs) and (prevRenOp in self.multiUseGPRDict):
                            self.multiUseGPRDict[prevRenOp].remove(key)
                         elif (type(key) == str) and ('MM' in key) and (prevRenOp in self.multiUseSIMDDict):
@@ -1228,36 +1236,19 @@ class Scheduler:
       return max(clock + 1, readyCycle)
 
 
-def latReducedDueToFastPtrChasing(memAddr: Dict, instrForLastWriteToReg: Callable[[str], Instr]):
-   if (memAddr is not None) and (memAddr.get('base') is not None) and (0 <= memAddr['disp'] < 2048):
-      lastWriteBase = instrForLastWriteToReg(getCanonicalReg(memAddr['base']))
-      lastWriteIndex = instrForLastWriteToReg(getCanonicalReg(memAddr['index'])) if ('index' in memAddr) else None
-      return ((lastWriteBase is not None) and (lastWriteBase.instrStr in ['MOV (R64, M64)', 'MOV (RAX, M64)', 'MOV (R32, M32)',
-                                                                          'MOV (EAX, M32)', 'MOVSXD (R64, M32)', 'POP (R64)'])
-             and (('index' not in memAddr) or ((lastWriteIndex is not None) and (lastWriteIndex.uops == 0))))
-   return False
+def latReducedDueToFastPtrChasing(uArchConfig: MicroArchConfig, memAddr: Dict, lastWriteBase: Optional[Instr], lastWriteIndex: Optional[Instr],
+                                  baseRenamedByElim32BitMove: bool):
+   return (uArchConfig.fastPointerChasing and (0 <= memAddr['disp'] < 2048) and (not baseRenamedByElim32BitMove) and (lastWriteBase is not None)
+          and (lastWriteBase.instrStr in ['MOV (R64, M64)', 'MOV (RAX, M64)', 'MOV (R32, M32)', 'MOV (EAX, M32)', 'MOVSXD (R64, M32)', 'POP (R64)'])
+          and (('index' not in memAddr) or ((lastWriteIndex is not None) and (lastWriteIndex.uops == 0))))
 
 
 # must only be called once for a given list of instructions
-def adjustLatenciesAndAddMergeUops(instructions, uArchConfig: MicroArchConfig):
-   prevWriteToReg = dict() # reg -> instr
-   high8RegClean = {'RAX': True, 'RBX': True, 'RCX': True, 'RDX': True}
+def adjustLatenciesAndAddMergeUops(instructions: List[Instr], uArchConfig: MicroArchConfig):
+   if uArchConfig.high8RenamedSeparately:
+      high8RegClean = {'RAX': True, 'RBX': True, 'RCX': True, 'RDX': True}
 
-   def processInstrRegOutputs(instr):
-      for outOp in instr.outputRegOperands:
-         canonicalOutReg = getCanonicalReg(outOp.reg)
-         if instr.mayBeEliminated:
-            prevWriteToInp = prevWriteToReg.get(getCanonicalReg(instr.inputRegOperands[0].reg), instr)
-            if ((instr.instrStr in ['MOV_89 (R64, R64)', 'MOV_8B (R64, R64)']) or
-                  ((instr.instrStr in ['MOV_89 (R32, R32)', 'MOV_8B (R32, R32)']) and prevWriteToInp.uops == 0)):
-               # ToDo: what if not actually eliminated?
-               prevWriteToReg[canonicalOutReg] = prevWriteToInp
-            else:
-               prevWriteToReg[canonicalOutReg] = instr
-         else:
-            prevWriteToReg[canonicalOutReg] = instr
-
-      if uArchConfig.high8RenamedSeparately:
+      def processInstrRegOutputs(instr):
          for op in instr.inputRegOperands + instr.memAddrOperands + instr.outputRegOperands:
             canonicalReg = getCanonicalReg(op.reg)
             if (canonicalReg in ['RAX', 'RBX', 'RCX', 'RDX']) and (getRegSize(op.reg) > 8):
@@ -1265,19 +1256,12 @@ def adjustLatenciesAndAddMergeUops(instructions, uArchConfig: MicroArchConfig):
             elif (op.reg in High8Regs) and (op in instr.outputRegOperands):
                high8RegClean[canonicalReg] = False
 
-   for instr in instructions:
-      processInstrRegOutputs(instr)
-   for instr in instructions:
-      for uop in instr.UopPropertiesList:
-         if uArchConfig.fastPointerChasing and (uop.isLoadUop or uop.isStoreAddressUop) and latReducedDueToFastPtrChasing(uop.memAddr, prevWriteToReg.get):
-            for k in list(uop.latencies.keys()):
-               uop.latencies[k] -= 1
-
-      if uArchConfig.high8RenamedSeparately:
-         for uop in instr.UopPropertiesList:
-            if any(high8RegClean[getCanonicalReg(inOp.reg)] for inOp in uop.inputOperands if isinstance(inOp, RegOperand) and (inOp.reg in High8Regs)):
-               for key in list(uop.latencies.keys()):
-                  uop.latencies[key] += 1
+      for instr in instructions:
+         processInstrRegOutputs(instr)
+      for instr in instructions:
+         for (inOp, outOp) in instr.latencies:
+            if isinstance(inOp, RegOperand) and (inOp.reg in High8Regs) and high8RegClean[getCanonicalReg(inOp.reg)]:
+               instr.latencies[(inOp, outOp)] += 1
 
          for inOp in instr.inputRegOperands + instr.memAddrOperands:
             canonicalInReg = getCanonicalReg(inOp.reg)
@@ -1287,10 +1271,10 @@ def adjustLatenciesAndAddMergeUops(instructions, uArchConfig: MicroArchConfig):
                regMergeUopProp = UopProperties(instr, ['1', '5'], [canonicalInOp], [canonicalOutOp], {canonicalOutOp: 1}, isRegMergeUop=True)
                instr.regMergeUopPropertiesList.append(regMergeUopProp)
 
-      processInstrRegOutputs(instr)
+         processInstrRegOutputs(instr)
 
 
-def computeUopProperties(instructions):
+def computeUopProperties(instructions: List[Instr]):
    for instr in instructions:
       if instr.macroFusedWithPrevInstr:
          continue
@@ -2300,8 +2284,8 @@ def runSimulation(disas, uArchConfig: MicroArchConfig, alignmentOffset, initPoli
       print('no instructions found')
       exit(1)
 
-   computeUopProperties(instructions)
    adjustLatenciesAndAddMergeUops(instructions, uArchConfig)
+   computeUopProperties(instructions)
 
    retireQueue = deque()
    rb = ReorderBuffer(retireQueue, uArchConfig)
