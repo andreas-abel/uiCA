@@ -4,6 +4,7 @@ import argparse
 import importlib
 import os
 import re
+import sys
 from collections import Counter, deque, namedtuple, OrderedDict
 from concurrent import futures
 from heapq import heappop, heappush
@@ -270,7 +271,7 @@ class AbstractValueGenerator:
          return self.__generateFreshAbstractValue()
 
 
-RenameDictEntry = namedtuple('RenameDictEntry', ['renamedOp', 'renamedByElim32BitMove'], defaults=[False])
+RenameDictEntry = namedtuple('RenameDictEntry', ['renamedOp', 'renamedByElim32BitMove'])
 class Renamer:
    def __init__(self, IDQ, reorderBuffer, uArchConfig: MicroArchConfig, initPolicy):
       self.IDQ = IDQ
@@ -377,7 +378,7 @@ class Renamer:
                else:
                   curMultiUseDict = self.multiUseSIMDDict
 
-               entry = self.renameDict.setdefault(canonicalInpReg, RenameDictEntry(RenamedOperand(ready=-1)))
+               entry = self.renameDict.setdefault(canonicalInpReg, RenameDictEntry(RenamedOperand(ready=-1), False))
                self.curInstrRndRenameDict[canonicalOutReg] = RenameDictEntry(entry.renamedOp, is32BitMove)
                if not entry.renamedOp in curMultiUseDict:
                   curMultiUseDict[entry.renamedOp] = set()
@@ -398,10 +399,10 @@ class Renamer:
                      key = self.getStoreBufferKey(uop.prop.memAddr)
                      baseReg = uop.prop.memAddr.get('base')
                      baseEntry = self.renameDict.get(getCanonicalReg(baseReg)) if baseReg else None
-                     baseInstr = baseEntry.renamedOp.uop.prop.instr if baseEntry and baseEntry.renamedOp.uop else None
+                     baseInstr = baseEntry.renamedOp.uop.prop.instr if (baseEntry and baseEntry.renamedOp.uop) else None
                      indexReg = uop.prop.memAddr.get('index')
                      indexEntry = self.renameDict.get(getCanonicalReg(indexReg)) if indexReg else None
-                     indexInstr = indexEntry.renamedOp.uop.prop.instr if indexEntry and indexEntry.renamedOp.uop else None
+                     indexInstr = indexEntry.renamedOp.uop.prop.instr if (indexEntry and indexEntry.renamedOp.uop) else None
                      uop.latReducedDueToFastPtrChasing = latReducedDueToFastPtrChasing(self.uArchConfig, uop.prop.memAddr, baseInstr, indexInstr,
                                                                                        (baseEntry and baseEntry.renamedByElim32BitMove))
                      uop.storeBufferEntry = self.storeBufferEntryDict.get(key, None)
@@ -411,7 +412,7 @@ class Renamer:
                         renOp = self.curInstrPseudoOpDict[inpOp]
                      else:
                         key = self.getRenameDictKey(inpOp)
-                        renOp = self.renameDict.setdefault(key, RenameDictEntry(RenamedOperand(ready=-1))).renamedOp
+                        renOp = self.renameDict.setdefault(key, RenameDictEntry(RenamedOperand(ready=-1), False)).renamedOp
                      uop.renamedInputOperands.append(renOp)
                   for outOp in uop.prop.outputOperands:
                      renOp = RenamedOperand(outOp, uop)
@@ -420,13 +421,13 @@ class Renamer:
                         self.curInstrPseudoOpDict[outOp] = renOp
                      else:
                         key = self.getRenameDictKey(outOp)
-                        self.curInstrRndRenameDict[key] = RenameDictEntry(renOp)
+                        self.curInstrRndRenameDict[key] = RenameDictEntry(renOp, False)
                         if isinstance(outOp, RegOperand):
                            self.absValGen.setAbstractValueForCurInstr(key, uop.prop.instr)
                else:
                   # e.g., xor rax, rax
                   for op in uop.prop.instr.outputRegOperands:
-                     self.curInstrRndRenameDict[getCanonicalReg(op.reg)] = RenameDictEntry(RenamedOperand(uop=uop, ready=-1))
+                     self.curInstrRndRenameDict[getCanonicalReg(op.reg)] = RenameDictEntry(RenamedOperand(uop=uop, ready=-1), False)
 
             if uop.prop.isLastUopOfInstr or uop.prop.isRegMergeUop or isinstance(uop, StackSyncUop):
                for key in self.curInstrRndRenameDict:
@@ -2002,6 +2003,289 @@ def getBottlenecks(TP, perfEvents, instrInstances: List[InstrInstance], uArchCon
    return bottlenecks
 
 
+LatGraphEdge = namedtuple('LatencyGraphEdge', ['source', 'target', 'cost', 'time'])
+def generateLatencyGraph(instructions: List[Instr], uArchConfig: MicroArchConfig, initPolicy):
+   moves = [instr for instr in instructions if instr.mayBeEliminated]
+   prevWriteForMove = {}
+   prevNonEliminatedWriteForMove = {}
+   outputOfMoveRenamedBy32BitMove = {}
+
+   prevWriteToReg = {}
+   for instr in instructions * 2:
+      if instr.mayBeEliminated:
+         prevWriteForMove[instr] = prevWriteToReg.get(getCanonicalReg(instr.inputRegOperands[0].reg))
+      for outOp in instr.outputRegOperands:
+         prevWriteToReg[getCanonicalReg(outOp.reg)] = instr
+
+   for move in moves:
+      movesOnPath = set()
+      curInstr = move
+      while (curInstr is not None) and (curInstr not in movesOnPath):
+         if curInstr.mayBeEliminated and (getRegSize(curInstr.outputRegOperands[0].reg) == 32):
+            outputOfMoveRenamedBy32BitMove[move] = True
+         if not curInstr.mayBeEliminated:
+            prevNonEliminatedWriteForMove[move] = curInstr
+            break
+         movesOnPath.add(curInstr)
+         curInstr = prevWriteForMove[curInstr]
+
+   prevWriteToKey = dict() # key -> (instr, outOp, fastPtrChasing, iteration)
+   absValGen = AbstractValueGenerator(initPolicy)
+
+   def getOpKey(op):
+      if isinstance(op, RegOperand):
+         return getCanonicalReg(op.reg)
+      elif isinstance(op, FlagOperand):
+         return op.flags
+      elif isinstance(op, MemOperand):
+         memAddr = op.memAddr
+         return (absValGen.getAbstractValueForReg(memAddr.get('base')), absValGen.getAbstractValueForReg(memAddr.get('index')),
+                  memAddr.get('scale'), memAddr.get('disp'))
+      else:
+         return None
+
+   RSPImplicitlyChanged = False
+   def processInstrOutputs(instr: Instr, iteration):
+      fastPtrChasing = False
+      if uArchConfig.fastPointerChasing and instr.inputMemOperands:
+         baseReg = instr.inputMemOperands[0].memAddr.get('base')
+         baseInstr = ((prevNonEliminatedWriteForMove.get(prevWriteToKey[baseReg][0]) if prevWriteToKey[baseReg][0].mayBeEliminated else prevWriteToKey[baseReg][0])
+                        if baseReg in prevWriteToKey else None)
+         baseRenamedBy32BitMove = (baseReg in prevWriteToKey) and outputOfMoveRenamedBy32BitMove.get(prevWriteToKey[baseReg][0])
+         indexReg = instr.inputMemOperands[0].memAddr.get('index')
+         indexInstr = ((prevNonEliminatedWriteForMove.get(prevWriteToKey[indexReg][0]) if prevWriteToKey[indexReg][0].mayBeEliminated else prevWriteToKey[indexReg][0])
+                        if indexReg in prevWriteToKey else None)
+
+         fastPtrChasing = latReducedDueToFastPtrChasing(uArchConfig, instr.inputMemOperands[0].memAddr, baseInstr, indexInstr, baseRenamedBy32BitMove)
+
+      nonlocal RSPImplicitlyChanged
+      if instr.implicitRSPChange:
+         RSPImplicitlyChanged = True
+      elif any((getCanonicalReg(op.reg) == 'RSP') for op in instr.inputRegOperands+instr.memAddrOperands+instr.outputRegOperands):
+         RSPImplicitlyChanged = False
+
+      for outOp in instr.outputRegOperands + instr.outputFlagOperands + instr.outputMemOperands:
+         prevWriteToKey[getOpKey(outOp)] = (instr, outOp, fastPtrChasing, iteration)
+         if isinstance(outOp, RegOperand):
+            absValGen.setAbstractValueForCurInstr(getOpKey(outOp), instr)
+
+      absValGen.finishCurInstr()
+
+   for instr in instructions * 2:
+      processInstrOutputs(instr, 0)
+
+   nodesForInstr = {}
+   edgesForNode = {}
+
+   for instr in instructions:
+      nodesForInstr[instr] = []
+      for op in instr.inputRegOperands + instr.memAddrOperands + instr.inputFlagOperands + instr.inputMemOperands:
+         nodesForInstr[instr].append(op)
+
+         if getOpKey(op) in prevWriteToKey:
+            prevInstr, prevOutOp, fastPtrChasing, prevIt = prevWriteToKey[getOpKey(op)]
+            for prevInOp in prevInstr.inputRegOperands + prevInstr.memAddrOperands + prevInstr.inputFlagOperands + prevInstr.inputMemOperands:
+               if prevInstr.mayBeEliminated:
+                  lat = 0
+               elif (not isinstance(prevInOp, MemOperand)) and isinstance(op, MemOperand):
+                  lat = 0 # ToDo
+               elif prevInstr.latencies.get((prevInOp, prevOutOp), 0) > 0:
+                  lat = prevInstr.latencies[(prevInOp, prevOutOp)]
+                  if fastPtrChasing and (prevInOp in prevInstr.memAddrOperands) and prevInstr.inputMemOperands:
+                     lat -= 1
+                  elif (RSPImplicitlyChanged and (prevInOp in instr.inputRegOperands+instr.memAddrOperands)
+                        and (getCanonicalReg(prevInOp.reg) == 'RSP') and (not prevInOp.isImplicitStackOperand)):
+                     lat += 1
+               else:
+                  continue
+
+               edge = LatGraphEdge(prevInOp, op, lat, (0 if prevIt else 1))
+               edgesForNode.setdefault(prevInOp, []).append(edge)
+
+      processInstrOutputs(instr, 1)
+   return (nodesForInstr, edgesForNode)
+
+
+def computeMaximumLatencyForGraph(instructions: List[Instr], nodesForInstr, edgesForNode):
+   # based on https://stackoverflow.com/a/62006383/10461973
+   def findStronglyConnectedComponents(nodesForInstr, edgesForNode):
+      indexDict = {}
+      lowlinkDict = {}
+      onStackSet = set()
+      S = []
+      components = []
+
+      for nodeList in nodesForInstr.values():
+         for n in nodeList:
+            if n not in indexDict:
+               callStack  = [(n, 0)]
+
+               while (callStack):
+                  v, pi = callStack.pop()
+
+                  if pi == 0:
+                     index = len(indexDict)
+                     lowlinkDict[v] = index
+                     indexDict[v] = index
+                     S.append(v)
+                     onStackSet.add(v)
+                  else:
+                     prev = edgesForNode[v][pi-1].target
+                     lowlinkDict[v] = min(lowlinkDict[v], lowlinkDict[prev])
+
+                  while pi < len(edgesForNode.get(v, [])) and (edgesForNode[v][pi].target in indexDict):
+                     w = edgesForNode[v][pi].target
+                     if w in onStackSet:
+                        lowlinkDict[v] = min(lowlinkDict[v], indexDict[w])
+                     pi += 1
+
+                  if pi < len(edgesForNode.get(v, [])):
+                     w = edgesForNode[v][pi].target
+                     callStack.append((v, pi+1))
+                     callStack.append((w, 0))
+                     continue
+
+                  if lowlinkDict[v] == indexDict[v]:
+                     comp = []
+                     while True:
+                        w = S.pop()
+                        onStackSet.remove(w)
+                        comp.append(w)
+                        if v == w:
+                           break
+                     components.append(comp)
+      return components
+
+   # based on the "VAL" algorithm described in https://doi.org/10.1145/1027084.1027085
+   def maximumCycleRatio(nodes, edges, r=sys.maxsize, eps=0.01):
+      def findRatio(nodes, r, p):
+         visited = {v: None for v in nodes}
+         handle = None
+         for v in nodes:
+            if visited[v] is not None:
+               continue
+            u = v
+            while True:
+               visited[u] = v
+               u = p[u].target
+               if visited[u] is not None:
+                  break
+            if visited[u] != v:
+               continue
+            x = u
+            sum = 0
+            len = 0
+            while True:
+               sum = sum - p[u].cost
+               len = len + p[u].time
+               u = p[u].target
+               if x == u:
+                  break
+            if r > sum/len:
+               r = sum/len
+               handle = u
+         return (r, handle)
+
+      d = {v: sys.maxsize for v in nodes}
+      p = {v: None for v in nodes}
+
+      for e in edges:
+         if -e.cost < d[e.source]:
+            d[e.source] = -e.cost
+            p[e.source] = e
+
+      edgesOnMaxCycle = []
+      while True:
+         r, handle = findRatio(nodes, r, p)
+         if handle:
+            edgesOnMaxCycle = []
+            u = handle
+            while True:
+               edgesOnMaxCycle.append(p[u])
+               u = p[u][1]
+               if u == handle:
+                  break
+
+         changed = False
+         for e in edges:
+            if d[e.source] > d[e.target] - e.cost - r*e.time + eps:
+               d[e.source] = d[e.target] - e.cost - r*e.time
+               p[e.source] = e
+               changed = True
+         if not changed:
+            return (-r, edgesOnMaxCycle)
+
+   components = findStronglyConnectedComponents(nodesForInstr, edgesForNode)
+
+   maxCycleRatio = 0
+   edgesOnMaxCycle = []
+   for comp in components:
+      edgesForComp = [e for n in comp for e in edgesForNode.get(n, []) if e.target in comp]
+      if edgesForComp:
+         curMaxCycleRatio, curEdgesOnMaxCycle = maximumCycleRatio(comp, edgesForComp)
+         if curMaxCycleRatio > maxCycleRatio:
+            maxCycleRatio = curMaxCycleRatio
+            edgesOnMaxCycle = curEdgesOnMaxCycle
+
+   return (maxCycleRatio, edgesOnMaxCycle, components)
+
+
+def generateGraphvizOutputForLatencyGraph(instructions: List[Instr], nodesForInstr, edgesForNode, edgesOnMaxCycle, stronglyConnectedComponents, filename):
+   import pydot
+   graph = pydot.Dot("g", graph_type="digraph", bgcolor="white")
+
+   for i, instr in enumerate(instructions):
+      cluster = pydot.Cluster(str(id(instr)), label=str(i) + ': ' + instr.asm)
+      graph.add_subgraph(cluster)
+
+      prevNodeId = None
+      for node in nodesForInstr[instr]:
+         label = ''
+         shape = ''
+         fillcolor = 'aqua'
+         color = 'black'
+         penwidth = 1
+         if isinstance(node, RegOperand):
+            label = node.reg
+            if node in instr.memAddrOperands:
+               shape = 'hexagon'
+               fillcolor = 'darkolivegreen1'
+            else:
+               shape = 'oval'
+               fillcolor = 'darkslategray1'
+         elif isinstance(node, MemOperand):
+            label = 'Mem'
+            shape = 'rect'
+            fillcolor = 'darksalmon'
+         elif isinstance(node, FlagOperand):
+            label = node.flags
+            shape = 'octagon'
+            fillcolor = 'gold'
+         if any(node == e.source for e in edgesOnMaxCycle):
+            color = 'red'
+            penwidth = 3
+         cluster.add_node(pydot.Node(str(id(node)), label=label, shape=shape, color=color, fillcolor=fillcolor, penwidth=penwidth, style='filled'))
+         if prevNodeId:
+            graph.add_edge(pydot.Edge(prevNodeId, str(id(node)), style='invis'))
+         prevNodeId = str(id(node))
+
+   for nodeList in nodesForInstr.values():
+      for node in nodeList:
+         for e in edgesForNode.get(node, []):
+            color = 'lightgray'
+            penwidth = 1
+            if e in edgesOnMaxCycle:
+               color = 'red'
+               penwidth = 3
+            elif any(e.source in comp and e.target in comp for comp in stronglyConnectedComponents):
+               color = 'blue'
+
+            graph.add_edge(pydot.Edge(str(id(e.source)), str(id(e.target)), xlabel=e.cost, constraint=False, color=color, fontcolor=color,
+                           style=('dashed' if e.time else ''), headport='w', tailport='e', penwidth=penwidth))
+
+   graph.write(filename, format=(filename.split('.')[-1] if ('.' in filename) else 'dot'), prog='dot')
+
+
 def writeHtmlFile(filename, title, head, body, includeDOCTYPE=True):
    with open(filename, 'w') as f:
       if includeDOCTYPE:
@@ -2278,8 +2562,9 @@ def getURL(instrStr):
 
 # Returns the throughput
 def runSimulation(disas, uArchConfig: MicroArchConfig, alignmentOffset, initPolicy, noMicroFusion, noMacroFusion, simpleFrontEnd,
-                  printDetails=False, traceFile=None, graphFile=None, jsonFile=None):
-   instructions = getInstructions(disas, uArchConfig, importlib.import_module('instrData.'+uArchConfig.name), alignmentOffset, noMicroFusion, noMacroFusion)
+                  printDetails=False, traceFile=None, graphFile=None, depGraphFile=None, jsonFile=None):
+   instructions = getInstructions(disas, uArchConfig, importlib.import_module('instrData.'+uArchConfig.name+'_data'),
+                                  alignmentOffset, noMicroFusion, noMacroFusion)
    if not instructions:
       print('no instructions found')
       exit(1)
@@ -2366,6 +2651,11 @@ def runSimulation(disas, uArchConfig: MicroArchConfig, alignmentOffset, initPoli
    if graphFile is not None:
       generateHTMLGraph(graphFile, instructions, frontEnd.allGeneratedInstrInstances, uArchConfig, clock-1)
 
+   if depGraphFile is not None:
+      nodesForInstr, edgesForNode = generateLatencyGraph(instructions, uArchConfig, initPolicy)
+      _, edgesOnMaxCycle, comp = computeMaximumLatencyForGraph(instructions, nodesForInstr, edgesForNode)
+      generateGraphvizOutputForLatencyGraph(instructions, nodesForInstr, edgesForNode, edgesOnMaxCycle, comp, depGraphFile)
+
    if jsonFile is not None:
       generateJSONOutput(jsonFile, instructions, frontEnd, uArchConfig, clock-1)
 
@@ -2390,6 +2680,7 @@ def main():
    parser.add_argument('-noMacroFusion', help='Variant that does not support macro-fusion', action='store_true')
    parser.add_argument('-alignmentOffset', help='Alignment offset (relative to a 64-Byte cache line), or "all"; default: 0', default='0')
    parser.add_argument('-json', help='JSON output', nargs='?', const='result.json')
+   parser.add_argument('-depGraph', help='Output the dependency graph; the format is determined by the filename extension', nargs='?', const='dep.svg')
    parser.add_argument('-initPolicy', help='Initial register state; '
                                            'options: "diff" (all registers initially have different values), '
                                            '"same" (they all have the same value), '
@@ -2405,7 +2696,7 @@ def main():
       exit(1)
 
    if args.arch == 'all':
-      if args.TPonly or args.trace or args.graph or args.json or (args.alignmentOffset == 'all'):
+      if args.TPonly or args.trace or args.graph or args.depGraph or args.json or (args.alignmentOffset == 'all'):
          print('Unsupported parameter combination')
          exit(1)
       disasList = [xed.disasFile(args.filename, chip=MicroArchConfigs[uArch].XEDName, raw=args.raw, useIACAMarkers=args.iacaMarkers) for uArch in allMicroArchs]
@@ -2428,7 +2719,7 @@ def main():
    uArchConfig = MicroArchConfigs[args.arch]
    disas = xed.disasFile(args.filename, chip=uArchConfig.XEDName, raw=args.raw, useIACAMarkers=args.iacaMarkers)
    if args.alignmentOffset == 'all':
-      if args.TPonly or args.trace or args.graph or args.json:
+      if args.TPonly or args.trace or args.graph or args.depGraph or args.json:
          print('Unsupported parameter combination')
          exit(1)
       with futures.ProcessPoolExecutor() as executor:
@@ -2447,7 +2738,7 @@ def main():
          print('    - {:.2f} otherwise\n'.format(sortedTP[-1][0], sortedTP[-1][1]))
    else:
       TP = runSimulation(disas, uArchConfig, int(args.alignmentOffset), args.initPolicy, args.noMicroFusion, args.noMacroFusion, args.simpleFrontEnd,
-                    not args.TPonly, args.trace, args.graph, args.json)
+                    not args.TPonly, args.trace, args.graph, args.depGraph, args.json)
       if args.TPonly:
          print('{:.2f}'.format(TP))
 

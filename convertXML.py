@@ -92,7 +92,7 @@ def main():
 
                ports = measurementNode.attrib.get('ports'+mSuffix)
                if ports is not None: # ToDo: AMD
-                  if (archNode.attrib['name'] not in ['ICL', 'TGL', 'RKL']) and (XMLInstr.attrib['category'] == 'COND_BR') and (ports == '1*p06'):
+                  if (archNode.attrib['name'] not in ['ICL', 'TGL', 'RKL', 'ADL-P']) and (XMLInstr.attrib['category'] == 'COND_BR') and (ports == '1*p06'):
                      ports = '1*p6' # taken branches can only use port 6
                   perfData['ports'+iSuffix] = {p.replace('p', ''): int(n) for np in ports.split('+') for n, p in [np.split('*')]}
                elif perfData.get('uops'+iSuffix, -1) == 0:
@@ -145,7 +145,7 @@ def main():
    open(os.path.join(path, '__init__.py'), 'a').close()
 
    for arch in instrDataForArch.keys():
-      with open(os.path.join(path, arch + '.py'), 'w') as f:
+      with open(os.path.join(path, arch + '_data.py'), 'w') as f:
          f.write('instrData = ' + repr(instrDataForArch[arch]) + '\n')
          f.write('perfData = ' + repr(perfDataForArch[arch]) + '\n')
          f.write('attrData = ' + repr(attrDataForArch[arch]) + '\n')
