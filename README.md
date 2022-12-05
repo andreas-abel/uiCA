@@ -17,7 +17,7 @@ An online version of uiCA is available at [uiCA.uops.info](https://uiCA.uops.inf
 
 * Prerequisites:
 
-      sudo apt-get install gcc python3 python3-pip
+      sudo apt-get install gcc python3 python3-pip graphviz
       pip3 install plotly
 
 * Installation:
@@ -36,7 +36,7 @@ An online version of uiCA is available at [uiCA.uops.info](https://uiCA.uops.inf
 * Prerequisites:
   * [Python 3](https://www.python.org/downloads/)
   * [MSVS compiler](https://visualstudio.microsoft.com/de/vs/features/cplusplus/)
-  * `pip3 install plotly`
+  * `pip3 install plotly pydot`
 
 * Installation:
 
@@ -66,6 +66,7 @@ The following parameters are optional. Parameter names may be abbreviated if the
 | `-raw`                   | Analyze a file that directly contains the machine code of the benchmark, but no headers or other data. |
 | `-trace <filename.html>` | Generate an HTML file that contains a table with a cycle-by-cycle view of how the instructions are executed. |
 | `-graph <filename.html>` | Generate an HTML file that contains a graph with various performance-related events.  |
+| `-depGraph <filename.x>` | Output the dependency graph; the format is determined by the filename extension (e.g., svg, png, dot, etc.)  |
 | `-alignmentOffset`       | Alignment offset (relative to a 64-Byte cache line). The option `all` provides an overview of the throughputs for all possible alignment offsets. `[Default: 0]` |
 | `-TPonly`                | Output only the throughput prediction. |
 | `-simpleFrontEnd`        | Simulate a simple front end that is only limited by the issue width. |
