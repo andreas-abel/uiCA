@@ -2,14 +2,15 @@
 
 import argparse
 import importlib
+import math
 import os
 import re
 import sys
 from collections import Counter, deque, namedtuple, OrderedDict
 from concurrent import futures
 from heapq import heappop, heappush
-from itertools import count, repeat
-from typing import List, Set, Dict, NamedTuple, Optional, Callable
+from itertools import count, cycle, repeat
+from typing import List, Set, Dict, NamedTuple, Optional
 
 import random
 random.seed(0)
@@ -1930,77 +1931,192 @@ def printUopsTable(tableLineData, uArchConfig: MicroArchConfig, addHyperlink=Tru
    print(getTableBorderLine(u'\u2514', u'\u2534', u'\u2518'))
 
 
-def getBottlenecks(TP, perfEvents, instrInstances: List[InstrInstance], uArchConfig: MicroArchConfig, nRounds):
-   allLamUops = [lamUop for instrI in instrInstances for lamUop in instrI.uops + instrI.regMergeUops + instrI.stackSyncUops]
-   allFusedUops = [fUop  for lamUop in allLamUops for fUop in lamUop.getFusedUops()]
-   allUnfusedUops = [uop for fUop in allFusedUops for uop in fUop.getUnfusedUops()]
+def printBottlenecks(TP, instructions, instrInstancesForInstr, disas, alignmentOffset, loop, depLimit, uArchConfig: MicroArchConfig, nRounds):
+   allLamUops = [lamUop for iiList in instrInstancesForInstr.values() for ii in iiList for lamUop in ii.uops + ii.regMergeUops + ii.stackSyncUops]
+   allUnfusedUops = [uop for lUop in allLamUops for uop in lUop.getUnfusedUops()]
 
+   output = []
    bottlenecks = []
 
-   # Ports
-   portUsageC = Counter(uop.actualPort for uop in allUnfusedUops if uop.actualPort)
-   for p in sorted(portUsageC):
-      if portUsageC[p] / nRounds >= .99 * TP:
-         bottlenecks.append('Port ' + p)
+   # Front End
+   miteInstrs = [i for i in instructions if instrInstancesForInstr[i] and (instrInstancesForInstr[i][0].source == 'MITE')]
+   dsbInstrs = [i for i in instructions if instrInstancesForInstr[i] and (instrInstancesForInstr[i][0].source == 'DSB')]
+   lsdInstrs = [i for i in instructions if instrInstancesForInstr[i] and (instrInstancesForInstr[i][0].source == 'LSD')]
+
+   if miteInstrs:
+      if (not dsbInstrs) and (not lsdInstrs):
+         predecLimit = round(computePredecLimit(disas, loop, alignmentOffset), 2)
+         if predecLimit:
+            output.append('  - Predecoder: {:.2f}'.format(predecLimit))
+            if predecLimit >= .98 * TP:
+               bottlenecks.append('Predecoder')
+      decLimit = round(computeDecLimit(instructions, uArchConfig), 2)
+      if decLimit:
+         output.append('  - Decoder: {:.2f}'.format(decLimit))
+         if decLimit >= .98 * TP:
+            bottlenecks.append('Decoder')
+
+   if dsbInstrs:
+      dsbLimit = round(computeDSBLimit(instructions, alignmentOffset), 2)
+      if dsbLimit:
+         output.append('  - DSB: {:.2f}'.format(dsbLimit))
+         if dsbLimit >= .98 * TP:
+            bottlenecks.append('DSB')
+
+   if lsdInstrs:
+      lsdLimit = round(computeLSDLimit(instructions, uArchConfig), 2)
+      if lsdLimit:
+         output.append('  - LSD: {:.2f}'.format(lsdLimit))
+         if lsdLimit >= .98 * TP:
+            bottlenecks.append('LSD')
+
+   issueLimit = round(computeIssueLimit(instructions, uArchConfig), 2)
+   if issueLimit:
+      output.append('  - Issue: {:.2f}'.format(issueLimit))
+      if issueLimit >= .98 * TP:
+         bottlenecks.append('Issue')
+
+   # Port Usage
+   portUsageLimit = round(computePortUsageLimit(instructions, instrInstancesForInstr), 2)
+   if portUsageLimit:
+      output.append('  - Ports: {:.2f}'.format(portUsageLimit))
+      if portUsageLimit >= .98 * TP:
+         bottlenecks.append('Ports')
+      else:
+         portUsageC = Counter(uop.actualPort for uop in allUnfusedUops if uop.actualPort)
+         maxPortUsage = max(portUsageC.values())
+         if maxPortUsage/nRounds >= .98 * TP:
+            bottlenecks.append('Scheduling')
 
    # Divider
    divUsage = sum(uop.prop.divCycles for uop in allUnfusedUops if uop.prop.divCycles)
    if divUsage / nRounds >= .99 * TP:
       bottlenecks.append('Divider')
 
-   # Retirement)
-   retireEvents = [fUop.retired for fUop in allFusedUops]
-   nRetireCycles = max(retireEvents) - min(retireEvents) + 1
-   if len(retireEvents) / nRetireCycles >= .99 * uArchConfig.retireWidth:
-      bottlenecks.append('Retirement')
-
    # Dependencies
-   portsUsedInCycle = {}
-   delayedUopsWithInpDepForPort = {p: [] for p in allPorts[uArchConfig.name]}
-   for uop in allUnfusedUops:
-      if uop.dispatched:
-         portsUsedInCycle.setdefault(uop.dispatched, set()).add(uop.actualPort)
-         if uop.renamedInputOperands and ((uop.readyForDispatch is None) or (uop.fusedUop.issued + uArchConfig.issueDispatchDelay + 1 < uop.readyForDispatch)):
-            delayedUopsWithInpDepForPort[uop.actualPort].append(uop)
-   if portsUsedInCycle:
-      depBottlenecks = 0
-      for cycle in range(min(portsUsedInCycle.keys()), max(portsUsedInCycle.keys())):
-         for port in allPorts[uArchConfig.name]:
-            if port in portsUsedInCycle.get(cycle, set()):
-               continue
-            for uop in delayedUopsWithInpDepForPort[port]:
-               if (uop.fusedUop.issued + uArchConfig.issueDispatchDelay + 1 <= cycle) and ((uop.readyForDispatch is None) or (uop.readyForDispatch > cycle)):
-                  depBottlenecks += 1
-      if depBottlenecks > len(allUnfusedUops):
+   if depLimit:
+      output.append('  - Dependencies: {:.2f}'.format(depLimit))
+      if depLimit >= .98 * TP:
          bottlenecks.append('Dependencies')
 
-   if not any((eventsDict.get('RSFull', 0) or eventsDict.get('RBFull', 0)) for eventsDict in perfEvents.values()):
-      # Front End
-      frontEndBottlenecks = []
-      if not any(eventsDict.get('IDQFull', 0) for eventsDict in perfEvents.values()):
-         if all((instrI.predecoded is not None) for instrI in instrInstances):
-            if any(eventsDict.get('IQFull', 0) for eventsDict in perfEvents.values()):
-               frontEndBottlenecks.append('Decoder')
+   print('Bottleneck' + ('s' if len(bottlenecks) > 1 else '') + ': ' + (', '.join(sorted(bottlenecks)) if bottlenecks else 'unknown'))
+   if output:
+      print('')
+      print('The following throughputs could be achieved if the given property were the only bottleneck:')
+      print('')
+      print('\n'.join(output))
+
+
+def computePortUsageLimit(instructions, instrInstancesForInstr={}):
+   portUsage = {}
+   for instr in instructions:
+      if instr.macroFusedWithPrevInstr:
+         continue
+      for ports, nUops in instr.portData.items():
+         if instr.mayBeEliminated:
+            instrIList = instrInstancesForInstr.get(instr, [])
+            if instrIList:
+               nUops = sum((not uop.eliminated) for instrI in instrIList for lamUop in instrI.uops for uop in lamUop.getUnfusedUops())/len(instrIList)
             else:
-               frontEndBottlenecks.append('Predecoder')
+               continue
+         portUsage[frozenset(ports)] = portUsage.get(frozenset(ports), 0) + nUops
 
-               decodeEvents = [lamUop.addedToIDQ for instrI in instrInstances for lamUop in instrI.uops if (lamUop.addedToIDQ is not None)]
-               nDecodeCycles = max(decodeEvents) - min(decodeEvents) + 1
-               if len(decodeEvents) / nDecodeCycles >= .99 * uArchConfig.nDecoders:
-                  frontEndBottlenecks.append('Decoder')
+   TP = 0
+   for pc in set(pc|pc2 for pc in portUsage for pc2 in portUsage):
+      uops = sum(u for pc2, u in portUsage.items() if pc2.issubset(pc))
+      TP = max(TP, uops/len(pc))
+   return TP
 
-            issueEvents = [fusedUop.issued for fusedUop in allFusedUops if (fusedUop.issued is not None)]
-            nIssueCycles = max(issueEvents) - min(issueEvents) + 1
-            if len(issueEvents) / nIssueCycles >= .99 * uArchConfig.issueWidth:
-               frontEndBottlenecks.append('Issue')
-      else:
-         frontEndBottlenecks.append('Issue')
-      bottlenecks.append('Front End' + (' (' + ', '.join(frontEndBottlenecks)  + ')' if frontEndBottlenecks else ''))
+
+def computeIssueLimit(instructions: List['Instr'], uArchConfig: 'MicroArchConfig'):
+   return sum(i.retireSlots for i in instructions if not i.macroFusedWithPrevInstr)/uArchConfig.issueWidth
+
+
+def hasLCP(instrD):
+   return (instrD['prefix66'] != '0') and (instrD.get('IMM_WIDTH', 0) == 16)
+
+
+def computePredecLimit(disas, loop=False, alignmentOffset=0):
+   codeLength = sum(len(d['opcode']) for d in disas) // 2
+   unroll = 1 if loop else (16 // math.gcd(codeLength, 16))
+   nB16Blocks = int(math.ceil((unroll * codeLength) / 16))
+   L = [0 for _ in range(0, nB16Blocks)] # number of instr. instances whose last byte is in the given block
+   O = [0 for _ in range(0, nB16Blocks)] # number of instr. instances whose nominal opcode starts in the given block but whose last byte is in the next block
+   LCP = [0 for _ in range(0, nB16Blocks)] # number of instr. instances whose nominal opcode starts in the given block, and which have a length-changing prefix
+   alignmentOffset = alignmentOffset % 16
+   curAddr = (-16 + alignmentOffset) if alignmentOffset else 0
+   for d in cycle(disas):
+      if curAddr >= unroll * codeLength:
+         break
+
+      nextAddr = curAddr + (len(d['opcode']) // 2)
+      endBlock = (nextAddr-1) // 16 # 16-Byte block in which the last Byte of the instruction is stored
+      posNominalOpcode = d['pos_nominal_opcode']
+      nominalOpcodeBlock = (curAddr + posNominalOpcode) // 16
+      curAddr = nextAddr
+
+      if 0 <= endBlock < nB16Blocks:
+         L[endBlock] += 1
+      if 0 <= nominalOpcodeBlock < nB16Blocks:
+         if nominalOpcodeBlock != endBlock:
+            O[nominalOpcodeBlock] += 1
+         if hasLCP(d):
+            LCP[nominalOpcodeBlock] += 1
+
+   cycles = 0
+   for bi in range(0, nB16Blocks):
+      cycles += math.ceil((L[bi]+O[bi])/5)
+      cycles += max(0, 3 * LCP[bi] - (math.ceil((L[bi-1]+O[bi-1])/5) - 1))
+   return cycles / unroll
+
+
+def computeDecLimit(instructions, uArchConfig):
+   instructions = [i for i in instructions if not i.macroFusedWithPrevInstr]
+   firstInstrOnDecInRound = {}
+   nAvailSimpleDec = 0
+   curDec = uArchConfig.nDecoders - 1
+   nComplexDecInRound = {}
+   for round in count(0):
+      nComplexDecInRound[round] = 0
+      for ii, instr in enumerate(instructions):
+         if instr.complexDecoder:
+            curDec = 0
+            nAvailSimpleDec = instr.nAvailableSimpleDecoders
+         else:
+            if ((nAvailSimpleDec == 0)
+                  or (curDec+1 == uArchConfig.nDecoders-1 and instr.macroFusibleWith and (not uArchConfig.macroFusibleInstrCanBeDecodedAsLastInstr))):
+               curDec = 0
+               nAvailSimpleDec = uArchConfig.nDecoders - 1
+            else:
+               curDec += 1
+               nAvailSimpleDec -= 1
+         if instr.isBranchInstr or instr.macroFusedWithNextInstr:
+            nAvailSimpleDec = 0
+
+         if curDec == 0:
+            nComplexDecInRound[round] += 1
+
+         if ii == 0:
+            if curDec in firstInstrOnDecInRound:
+               firstRound = firstInstrOnDecInRound[curDec]
+               return sum(nComplexDecInRound[r] for r in range(firstRound, round)) / (round - firstRound)
+            else:
+               firstInstrOnDecInRound[curDec] = round
+
+
+def computeLSDLimit(instructions, uArchConfig):
+   nUops = sum(i.uopsMITE + i.uopsMS for i in instructions if not i.macroFusedWithPrevInstr)
+   LSDUnrollCount = uArchConfig.LSDUnrolling.get(nUops, 1)
+   return math.ceil((nUops * LSDUnrollCount) / uArchConfig.issueWidth) / LSDUnrollCount
+
+
+def computeDSBLimit(instructions, alignmentOffset=0):
+   nUops = sum(i.uopsMITE for i in instructions if not i.macroFusedWithPrevInstr)
+   codeLength = sum(len(i.opcode) // 2 for i in instructions[:-1])
+   if (codeLength + alignmentOffset) // 32 == alignmentOffset // 32:
+      return math.ceil(nUops/6)
    else:
-      if not bottlenecks:
-         bottlenecks.append('Back End')
-
-   return bottlenecks
+      return nUops/6
 
 
 LatGraphEdge = namedtuple('LatencyGraphEdge', ['source', 'target', 'cost', 'time'])
@@ -2611,6 +2727,10 @@ def runSimulation(disas, uArchConfig: MicroArchConfig, alignmentOffset, initPoli
 
    TP = round((uopsForRelRound[-1][lastApplicableInstr][-1].retired - uopsForRelRound[0][lastApplicableInstr][-1].retired) / (len(uopsForRelRound)-1), 2)
 
+   if printDetails or (depGraphFile is not None):
+      nodesForInstr, edgesForNode = generateLatencyGraph(instructions, uArchConfig, initPolicy)
+      maxCycleRatio, edgesOnMaxCycle, comp = computeMaximumLatencyForGraph(instructions, nodesForInstr, edgesForNode)
+
    if printDetails:
       print('Throughput (in cycles per iteration): {:.2f}'.format(TP))
 
@@ -2637,12 +2757,13 @@ def runSimulation(disas, uArchConfig: MicroArchConfig, alignmentOffset, initPoli
             url = getURL(instr.instrStr)
          tableLineData.append(TableLineData(instr.asm, instr, url, uops))
 
-      bottlenecks = getBottlenecks(TP, perfEvents, relevantInstrInstances, uArchConfig, lastRelevantRound - firstRelevantRound + 1)
-      if bottlenecks:
-         print('Bottleneck' + ('s' if len(bottlenecks) > 1 else '') + ': ' + ', '.join(sorted(bottlenecks)))
+      printBottlenecks(TP, instructions, relevantInstrInstancesForInstr, disas, alignmentOffset, (not frontEnd.unroll), maxCycleRatio, uArchConfig,
+                       lastRelevantRound - firstRelevantRound + 1)
 
       print('')
       printUopsTable(tableLineData, uArchConfig)
+      print('')
+
 
    if traceFile is not None:
       #ToDo: use TableLineData instead
@@ -2652,8 +2773,6 @@ def runSimulation(disas, uArchConfig: MicroArchConfig, alignmentOffset, initPoli
       generateHTMLGraph(graphFile, instructions, frontEnd.allGeneratedInstrInstances, uArchConfig, clock-1)
 
    if depGraphFile is not None:
-      nodesForInstr, edgesForNode = generateLatencyGraph(instructions, uArchConfig, initPolicy)
-      _, edgesOnMaxCycle, comp = computeMaximumLatencyForGraph(instructions, nodesForInstr, edgesForNode)
       generateGraphvizOutputForLatencyGraph(instructions, nodesForInstr, edgesForNode, edgesOnMaxCycle, comp, depGraphFile)
 
    if jsonFile is not None:
