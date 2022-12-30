@@ -2677,7 +2677,7 @@ def getURL(instrStr):
 
 
 # Returns the throughput
-def runSimulation(disas, uArchConfig: MicroArchConfig, alignmentOffset, initPolicy, noMicroFusion, noMacroFusion, simpleFrontEnd,
+def runSimulation(disas, uArchConfig: MicroArchConfig, alignmentOffset, initPolicy, noMicroFusion, noMacroFusion, simpleFrontEnd, minIterations, minCycles,
                   printDetails=False, traceFile=None, graphFile=None, depGraphFile=None, jsonFile=None):
    instructions = getInstructions(disas, uArchConfig, importlib.import_module('instrData.'+uArchConfig.name+'_data'),
                                   alignmentOffset, noMicroFusion, noMacroFusion)
@@ -2710,13 +2710,13 @@ def runSimulation(disas, uArchConfig: MicroArchConfig, alignmentOffset, initPoli
                uopsForRound.append({instr: [] for instr in instructions})
             uopsForRound[rnd][instr].append(fusedUop)
             break
-      if rnd >= 10 and clock > 500:
+      if rnd >= minIterations and clock > minCycles:
          break
       clock += 1
 
    lastApplicableInstr = next(instr for instr in instructions if instr.isLastDecodedInstr()) # ignore macro-fused instr.
-   firstRelevantRound = len(uopsForRound) // 2
-   lastRelevantRound = len(uopsForRound) - 2 # last round may be incomplete, thus -2
+   lastRelevantRound = max(0, len(uopsForRound) - 2) # last round may be incomplete, thus -2
+   firstRelevantRound = min(lastRelevantRound, len(uopsForRound) // 2)
    if lastRelevantRound - firstRelevantRound > 10:
       for rnd in range(lastRelevantRound, lastRelevantRound - 5, -1):
          if uopsForRound[firstRelevantRound][lastApplicableInstr][-1].retireIdx == uopsForRound[rnd][lastApplicableInstr][-1].retireIdx:
@@ -2725,7 +2725,10 @@ def runSimulation(disas, uArchConfig: MicroArchConfig, alignmentOffset, initPoli
 
    uopsForRelRound = uopsForRound[firstRelevantRound:(lastRelevantRound+1)]
 
-   TP = round((uopsForRelRound[-1][lastApplicableInstr][-1].retired - uopsForRelRound[0][lastApplicableInstr][-1].retired) / (len(uopsForRelRound)-1), 2)
+   if firstRelevantRound == lastRelevantRound:
+      TP = uopsForRelRound[0][lastApplicableInstr][-1].retired
+   else:
+      TP = round((uopsForRelRound[-1][lastApplicableInstr][-1].retired - uopsForRelRound[0][lastApplicableInstr][-1].retired) / (len(uopsForRelRound)-1), 2)
 
    if printDetails or (depGraphFile is not None):
       nodesForInstr, edgesForNode = generateLatencyGraph(instructions, uArchConfig, initPolicy)
@@ -2798,6 +2801,8 @@ def main():
    parser.add_argument('-noMicroFusion', help='Variant that does not support micro-fusion', action='store_true')
    parser.add_argument('-noMacroFusion', help='Variant that does not support macro-fusion', action='store_true')
    parser.add_argument('-alignmentOffset', help='Alignment offset (relative to a 64-Byte cache line), or "all"; default: 0', default='0')
+   parser.add_argument('-minIterations', help='Simulate at least this many iterations; default: 10', type=int, default=10)
+   parser.add_argument('-minCycles', help='Simulate at least this many cycles; default: 500', type=int, default=500)
    parser.add_argument('-json', help='JSON output', nargs='?', const='result.json')
    parser.add_argument('-depGraph', help='Output the dependency graph; the format is determined by the filename extension', nargs='?', const='dep.svg')
    parser.add_argument('-initPolicy', help='Initial register state; '
@@ -2822,7 +2827,8 @@ def main():
       uArchConfigsList = [MicroArchConfigs[uArch] for uArch in allMicroArchs]
       with futures.ProcessPoolExecutor() as executor:
          TPList = list(executor.map(runSimulation, disasList, uArchConfigsList, repeat(int(args.alignmentOffset)), repeat(args.initPolicy),
-                                                   repeat(args.noMicroFusion), repeat(args.noMacroFusion), repeat(args.simpleFrontEnd)))
+                                                   repeat(args.noMicroFusion), repeat(args.noMacroFusion), repeat(args.simpleFrontEnd),
+                                                   repeat(args.minIterations), repeat(args.minCycles)))
       TPDict = {}
       for uArch, TP in zip(allMicroArchs, TPList):
          TPDict.setdefault(TP, []).append(str(uArch))
@@ -2843,7 +2849,7 @@ def main():
          exit(1)
       with futures.ProcessPoolExecutor() as executor:
          TPList = list(executor.map(runSimulation, repeat(disas), repeat(uArchConfig), range(0,64), repeat(args.initPolicy), repeat(args.noMicroFusion),
-                                                   repeat(args.noMacroFusion), repeat(args.simpleFrontEnd)))
+                                                   repeat(args.noMacroFusion), repeat(args.simpleFrontEnd), repeat(args.minIterations), repeat(args.minCycles)))
       TPDict = {}
       for al, TP in enumerate(TPList):
          TPDict.setdefault(TP, []).append(str(al))
@@ -2857,7 +2863,7 @@ def main():
          print('    - {:.2f} otherwise\n'.format(sortedTP[-1][0], sortedTP[-1][1]))
    else:
       TP = runSimulation(disas, uArchConfig, int(args.alignmentOffset), args.initPolicy, args.noMicroFusion, args.noMacroFusion, args.simpleFrontEnd,
-                    not args.TPonly, args.trace, args.graph, args.depGraph, args.json)
+                         args.minIterations, args.minCycles, not args.TPonly, args.trace, args.graph, args.depGraph, args.json)
       if args.TPonly:
          print('{:.2f}'.format(TP))
 
