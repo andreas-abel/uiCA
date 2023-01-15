@@ -1572,7 +1572,7 @@ def getInstructions(disas, uArchConfig: MicroArchConfig, archData, alignmentOffs
             allMemOperands = instrD['memOperands'].items()
             for inpN, inpM in allMemOperands:
                for reg, addrType in [(inpM.get('base'), 'addr'), (inpM.get('index'), 'addrI')]:
-                  if (reg is None) or ('IP' in reg): continue
+                  if (reg is None): continue
                   regOp = RegOperand(reg)
                   if (reg == 'RSP') and implicitRSPChange and (len(allMemOperands) == 1 or inpN == 'MEM1'):
                      regOp.isImplicitStackOperand = True
