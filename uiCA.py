@@ -1240,7 +1240,7 @@ class Scheduler:
 
 def latReducedDueToFastPtrChasing(uArchConfig: MicroArchConfig, memAddr: Dict, lastWriteBase: Optional[Instr], lastWriteIndex: Optional[Instr],
                                   baseRenamedByElim32BitMove: bool):
-   return (uArchConfig.fastPointerChasing and (0 <= memAddr['disp'] < 2048) and (not baseRenamedByElim32BitMove) and (lastWriteBase is not None)
+   return (uArchConfig.fastPointerChasing and (0 <= memAddr.get('disp', 0) < 2048) and (not baseRenamedByElim32BitMove) and (lastWriteBase is not None)
           and (lastWriteBase.instrStr in ['MOV (R64, M64)', 'MOV (RAX, M64)', 'MOV (R32, M32)', 'MOV (EAX, M32)', 'MOVSXD (R64, M32)', 'POP (R64)'])
           and (('index' not in memAddr) or ((lastWriteIndex is not None) and (lastWriteIndex.uops == 0))))
 
