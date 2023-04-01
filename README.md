@@ -53,7 +53,7 @@ An online version of uiCA is available at [uiCA.uops.info](https://uiCA.uops.inf
 
 	echo ".intel_syntax noprefix; l: add rax, rbx; add rbx, rax; dec r15; jnz l" > test.asm
     as test.asm -o test.o
-    ./uiCA.py test.o -arch SKL
+    ./uiCA.py -file test.o -arch SKL
 
 ## Command-Line Options
 
@@ -61,6 +61,8 @@ The following parameters are optional. Parameter names may be abbreviated if the
 
 | Option                       | Description |
 |------------------------------|-------------|
+| `-file`                  | The path to the file that uiCA should disassemble and analyze. Mutually exclusive with `-hex`. |
+| `-hex`                   | A string of bytes in hex form that uiCA should disassemble and analyze. Mutually exclusive with `-file`. |
 | `-arch`                  | The microarchitecture of the simulated CPU. Available microarchitectures: `SNB`, `IVB`, `HSW`, `BDW`, `SKL`, `SKX`, `KBL`, `CFL`, `CLX`, `ICL`, `TGL`, `RKL`. Alternatively, you can use `all` to get an overview of the throughputs for all supported microarchitectures.  `[Default: all]` |
 | `-iacaMarkers`           | Analyze only the code that is between the `IACA_START` and `IACA_END` markers of Intel's [IACA](https://software.intel.com/content/www/us/en/develop/articles/intel-architecture-code-analyzer.html) tool. |
 | `-raw`                   | Analyze a file that directly contains the machine code of the benchmark, but no headers or other data. |

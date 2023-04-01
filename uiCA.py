@@ -2783,14 +2783,14 @@ def runSimulation(disas, uArchConfig: MicroArchConfig, alignmentOffset, initPoli
 
    return TP
 
-
 # Disassembles a binary and finds for each instruction the corresponding entry in the XML file.
 # With the -iacaMarkers option, only the parts of the code that are between the IACA markers are considered.
 def main():
    allMicroArchs = sorted(m for m in MicroArchConfigs if not '_' in m)
 
    parser = argparse.ArgumentParser(description='Disassembler')
-   parser.add_argument('filename', help='File to be disassembled')
+   parser.add_argument('-filename', help='File to be disassembled')
+   parser.add_argument('-hex', help='Hex to be disassembled')
    parser.add_argument('-iacaMarkers', help='Use IACA markers', action='store_true')
    parser.add_argument('-raw', help='raw file', action='store_true')
    parser.add_argument('-arch', help='Microarchitecture; Possible values: all, ' + ', '.join(allMicroArchs), default='all')
@@ -2812,6 +2812,10 @@ def main():
                                            'default: "diff"', default='diff')
    args = parser.parse_args()
 
+   if (args.hex is not None and args.filename is not None) or (args.hex is None and args.filename is None):
+      print('One and only one of -hex or -filename must be specified')
+      exit(1)
+
    if not args.arch in list(MicroArchConfigs) + ['all']:
       print('Unsupported microarchitecture')
       exit(1)
@@ -2823,7 +2827,11 @@ def main():
       if args.TPonly or args.trace or args.graph or args.depGraph or args.json or (args.alignmentOffset == 'all'):
          print('Unsupported parameter combination')
          exit(1)
-      disasList = [xed.disasFile(args.filename, chip=MicroArchConfigs[uArch].XEDName, raw=args.raw, useIACAMarkers=args.iacaMarkers) for uArch in allMicroArchs]
+      
+      if args.filename is not None:
+         disasList = [xed.disasFile(args.filename, chip=MicroArchConfigs[uArch].XEDName, raw=args.raw, useIACAMarkers=args.iacaMarkers) for uArch in allMicroArchs]
+      else:
+         disasList = [xed.disasHex(args.hex, chip=MicroArchConfigs[uArch].XEDName, useIACAMarkers=args.iacaMarkers) for uArch in allMicroArchs]
       uArchConfigsList = [MicroArchConfigs[uArch] for uArch in allMicroArchs]
       with futures.ProcessPoolExecutor() as executor:
          TPList = list(executor.map(runSimulation, disasList, uArchConfigsList, repeat(int(args.alignmentOffset)), repeat(args.initPolicy),
@@ -2842,7 +2850,10 @@ def main():
       exit(0)
 
    uArchConfig = MicroArchConfigs[args.arch]
-   disas = xed.disasFile(args.filename, chip=uArchConfig.XEDName, raw=args.raw, useIACAMarkers=args.iacaMarkers)
+   if args.filename is not None:
+      disas = xed.disasFile(args.filename, chip=uArchConfig.XEDName, raw=args.raw, useIACAMarkers=args.iacaMarkers)
+   else:
+      disas = xed.disasHex(args.hex, chip=uArchConfig.XEDName, useIACAMarkers=args.iacaMarkers)
    if args.alignmentOffset == 'all':
       if args.TPonly or args.trace or args.graph or args.depGraph or args.json:
          print('Unsupported parameter combination')
