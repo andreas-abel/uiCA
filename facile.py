@@ -77,6 +77,11 @@ def computePredecLimit(disas, loop=False, alignmentOffset=0):
    return cycles / unroll
 
 
+def computePredecLimitSimple(hex, instructions):
+   codeLength = len(hex) // 2
+   return codeLength/16
+
+
 def computeDecLimit(instructions, uArchConfig):
    instructions = [i for i in instructions if not i.macroFusedWithPrevInstr]
    firstInstrOnDecInRound = {}
@@ -109,6 +114,11 @@ def computeDecLimit(instructions, uArchConfig):
                return sum(nComplexDecInRound[r] for r in range(firstRound, round)) / (round - firstRound)
             else:
                firstInstrOnDecInRound[curDec] = round
+
+
+def computeDecLimitSimple(instructions):
+   instructions = [i for i in instructions if not i.macroFusedWithPrevInstr]
+   return max(len(instructions)/4, len([i for i in instructions if i.complexDecoder]))
 
 
 def computeLSDLimit(instructions, uArchConfig):
@@ -407,3 +417,101 @@ def generateGraphvizOutputForLatencyGraph(instructions: List[Instr], nodesForIns
                            style=('dashed' if e.time else ''), headport='w', tailport='e', penwidth=penwidth))
 
    graph.write(filename, format=(filename.split('.')[-1] if ('.' in filename) else 'dot'), prog='dot')
+
+
+def getAnalyticalPredictionForUnrolling(instructions: List[Instr], hex, xedDisas, uArchConfig: MicroArchConfig, components: List[str]):
+   TPs = []
+   if 'predec' in components:
+      TPs.append(('predec', computePredecLimit(xedDisas)))
+   if 'predecSimple' in components:
+      TPs.append(('predec', computePredecLimitSimple(hex, instructions)))
+   if 'dec' in components:
+      TPs.append(('dec', computeDecLimit(instructions, uArchConfig)))
+   if 'decSimple' in components:
+      TPs.append(('decSimple', computeDecLimitSimple(instructions)))
+   if 'issue' in components:
+      TPs.append(('issue', computeIssueLimit(instructions, uArchConfig)))
+   if 'portUsage' in components:
+      TPs.append(('portUsage', computePortUsageLimit(instructions)))
+   if 'lat' in components:
+      nodesForInstr, edgesForNode = generateLatencyGraph(instructions, uArchConfig, 'stack')
+      lat = computeMaximumLatencyForGraph(instructions, nodesForInstr, edgesForNode)[0]
+      TPs.append(('lat', lat))
+
+   return TPs
+
+
+def getAnalyticalPredictionForLoop(instructions: List[Instr], hex, xedDisas, uArchConfig: MicroArchConfig, components: List[str]):
+   nonMacroFusedInstructions = [instr for instr in instructions if not instr.macroFusedWithPrevInstr]
+   if nonMacroFusedInstructions[-1].cannotBeInDSBDueToJCCErratum:
+      uopSource = 'MITE'
+   elif uArchConfig.LSDEnabled and sum(instr.uopsMITE for instr in nonMacroFusedInstructions) <= uArchConfig.IDQWidth:
+      uopSource = 'LSD'
+   else:
+      uopSource = 'DSB'
+
+   TPs = []
+   if 'dsb' in components:
+      TPs.append(('dsb', computeDSBLimit(instructions) if (uopSource == 'DSB') else 0))
+   if 'lsd' in components:
+      TPs.append(('lsd', computeLSDLimit(instructions, uArchConfig) if (uopSource == 'LSD') else 0))
+   if 'predec' in components:
+      TPs.append(('predec', computePredecLimit(xedDisas, loop=1) if (uopSource == 'MITE') else 0))
+   if 'predecSimple' in components:
+      TPs.append(('predec', computePredecLimitSimple(hex, instructions) if (uopSource == 'MITE') else 0))
+   if 'dec' in components:
+      TPs.append(('dec', computeDecLimit(instructions, uArchConfig) if (uopSource == 'MITE') else 0))
+   if 'decSimple' in components:
+      TPs.append(('decSimple', computeDecLimitSimple(instructions) if (uopSource == 'MITE') else 0))
+   if 'issue' in components:
+      TPs.append(('issue', computeIssueLimit(instructions, uArchConfig)))
+   if 'lat' in components:
+      nodesForInstr, edgesForNode = generateLatencyGraph(instructions, uArchConfig, 'stack')
+      lat = computeMaximumLatencyForGraph(instructions, nodesForInstr, edgesForNode)[0]
+      TPs.append(('lat', lat))
+   if 'portUsage' in components:
+      TPs.append(('portUsage', computePortUsageLimit(instructions)))
+
+   return TPs
+
+
+def main():
+   parser = argparse.ArgumentParser(description='AvgError')
+   parser.add_argument('-hex', type=str, help='Hex code of a basic block')
+   parser.add_argument('-file', type=str, help='File with hex codes (one per line)')
+   parser.add_argument('-mode', choices=['loop', 'unroll'], required=True)
+   parser.add_argument('-arch', help='Microarchitecture', default='SKL')
+   parser.add_argument('-analyticalComponents', default='predec,dec,dsb,lsd,issue,portUsage,lat')
+
+   args = parser.parse_args()
+
+   if (args.hex is not None) and (args.file is not None):
+      print('-hex and -file are not supported at the same time')
+      exit(1)
+   if (args.hex is None) and (args.file is None):
+      print('either -hex or -file is required')
+      exit(1)
+
+   if args.hex is not None:
+      lines = [args.hex]
+   else:
+      with open(args.file, 'r') as f:
+         lines = f.read().splitlines()
+
+   import xed
+   uArchConfig = MicroArchConfigs[args.arch]
+   archData = importlib.import_module('instrData.'+uArchConfig.name+'_data')
+
+   for hex in lines:
+      disas = xed.disasHex(hex, chip='TIGER_LAKE')
+      instructions = getInstructions(disas, uArchConfig, archData, 0)
+      if args.mode == 'unroll':
+         TPs = getAnalyticalPredictionForUnrolling(instructions, hex, disas, uArchConfig, args.analyticalComponents.split(','))
+      else:
+         TPs = getAnalyticalPredictionForLoop(instructions, hex, disas, uArchConfig, args.analyticalComponents.split(','))
+      TP = max(v for _, v in TPs)
+      print('{}: {:.2f}'.format(hex, TP))
+
+
+if __name__ == "__main__":
+    main()
