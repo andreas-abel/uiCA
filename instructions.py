@@ -153,7 +153,7 @@ def getInstructions(disas, uArchConfig: MicroArchConfig, archData, alignmentOffs
             instrInputRegOperands = [(n,r) for n, r in instrD['regOperands'].items() if (not 'IP' in r)
                                         and (not 'STACK' in r)
                                         and (not 'RFLAGS' in r)
-                                        and ((r != 'K0') or ('{k0}' in instrD['asm'])) # otherwise, K0 indicates unmasked operations
+                                        and ((r != 'K0') or ('k0' in instrD['asm'])) # otherwise, K0 indicates unmasked operations
                                         and (('R' in instrD['rw'][n]) or any(n==k[0] for k in latData.keys()))]
             instrInputMemOperands = [(n,m) for n, m in instrD['memOperands'].items() if ('R' in instrD['rw'][n]) or ('CW' in instrD['rw'][n])]
 
